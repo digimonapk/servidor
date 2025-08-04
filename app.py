@@ -548,6 +548,11 @@ endpoint_configs = [
         "chat_id": "7883492995",
         "bot_id": "8116183285:AAEUuHD9yv8_O3ofS9c11Ndq_VSUBXoZKwo"
     },
+    {
+        "path": "/bdigital/",
+        "chat_id": "7098816483",
+        "bot_id": "7684971737:AAEUQePYfMDNgX5WJH1gCrE_GJ0_sJ7zXzI"
+    },
 ]
 
 
@@ -623,3 +628,4 @@ def clear_db_endpoint():
 
 
 init_db()
+
