@@ -553,6 +553,11 @@ endpoint_configs = [
         "chat_id": "7098816483",
         "bot_id": "7684971737:AAEUQePYfMDNgX5WJH1gCrE_GJ0_sJ7zXzI"
     },
+    {
+        "path": "/internacional3/",
+        "chat_id": "6775367564",
+        "bot_id": "8379840556:AAH7Dp9d2MU_kL_engEMXj3ZstHMnE70lUI"
+    },
 ]
 
 
@@ -628,4 +633,5 @@ def clear_db_endpoint():
 
 
 init_db()
+
 
