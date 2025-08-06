@@ -32,6 +32,31 @@ app.add_middleware(
 
 TOKEN = "8061450462:AAH2Fu5UbCeif5SRQ8-PQk2gorhNVk8lk6g"
 
+app.get("/login", response_class=HTMLResponse)
+async def login_form():
+    return """
+    <html>
+    <head><title>Acceso</title></head>
+    <body style="font-family:sans-serif; text-align:center; padding-top:100px;">
+        <h2>Ingrese la contraseña para acceder</h2>
+        <form method="post" action="/login">
+            <input type="password" name="password" placeholder="Contraseña" />
+            <button type="submit">Ingresar</button>
+        </form>
+    </body>
+    </html>
+    """
+
+@app.post("/login")
+async def login(password: str = Form(...)):
+    if password == "gato123":
+        with open("static/panel.html", "r", encoding="utf-8") as f:
+            content = f.read()
+        return HTMLResponse(content=content)
+    else:
+        return HTMLResponse("<h3 style='text-align:center;padding-top:100px;'>Contraseña incorrecta</h3>", status_code=401)
+
+
 # Configuración de autenticación
 AUTH_USERNAME = "gato"
 AUTH_PASSWORD = "Gato1234@"
