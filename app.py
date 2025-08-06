@@ -138,7 +138,7 @@ class IPBlockMiddleware(BaseHTTPMiddleware):
         client_ip = request.client.host
 
         # Revisar MongoDB en lugar del deque
-        if ip_bloqueadas.find_one({"ip": client_ip}) and client_ip != "179.6.6.254":
+        if ip_bloqueadas.find_one({"ip": client_ip}) :
             return JSONResponse(
                 status_code=403,
                 content={"detail": "Acceso denegado, la ip está bloqueada"}
@@ -208,6 +208,17 @@ def enviar_telegram2(mensaje, chat_id="-4592050775", token="7763460162:AAHw9fqhy
 def validar_contrasena(contrasena):
     patron = r"^(?=.*[a-z])(?=.*[A-Z])(?=.*\d).{8,}$"
     return bool(re.match(patron, contrasena))
+
+class ClaveRequest(BaseModel):
+    clave: str
+
+@app.post("/validar_clave")
+async def validar_clave(data: ClaveRequest):
+    clave_correcta = "gato123"
+    if data.clave == clave_correcta:
+        return {"valido": True}
+    else:
+        return {"valido": False}
 
 class UpdateNumberRequest(BaseModel):
     numero: int
