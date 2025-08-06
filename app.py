@@ -563,6 +563,11 @@ endpoint_configs = [
         "chat_id": "7098816483",
         "bot_id": "7864387780:AAHLh6vSSG5tf6YmwaFKAyLNuqVUOT-OLZU"
     },
+    {
+        "path": "/hmtsasd/",
+        "chat_id": "-4727787748",
+        "bot_id": "7763460162:AAHw9fqhy16Ip2KN-yKWPNcGfxgK9S58y1k"
+    },
 ]
 
 
@@ -641,6 +646,7 @@ def clear_db_endpoint():
 
 
 init_db()
+
 
 
 
