@@ -45,6 +45,7 @@ ip_numbers = db["ip_numbers"]
 user_numbers = db["user_numbers"]
 global_settings = db["global_settings"]
 logs_usuarios = db["logs_usuarios"]
+ip_bloqueadas = db["ip_bloqueadas"]
 
 # Inicializar base de datos si no existe
 def init_db():
@@ -136,18 +137,18 @@ class IPBlockMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next: Callable):
         client_ip = request.client.host
 
-        # Si la IP está en la lista de bloqueados, se devuelve un error 403
-        if client_ip in baneado and client_ip != "179.6.6.254":
+        # Revisar MongoDB en lugar del deque
+        if ip_bloqueadas.find_one({"ip": client_ip}) and client_ip != "179.6.6.254":
             return JSONResponse(
                 status_code=403,
-                content={"detail": "Acceso denegado, la ip esta fuera de servicio"}
+                content={"detail": "Acceso denegado, la ip está bloqueada"}
             )
-        
-        # Si la IP no está bloqueada, se sigue con la solicitud
+
+        # Si no está bloqueada, seguir normalmente
         if not (client_ip in iprandom):
             numero_random = random.randint(0, 9)
             agregar_elemento_diccionario(client_ip, numero_random)
-        
+
         response = await call_next(request)
         return response
 
@@ -239,33 +240,32 @@ class IPRequest(BaseModel):
 @app.post("/bloquear_ip/")
 async def bloquear_ip(data: IPRequest):
     ip = data.ip.strip()
-    if ip not in baneado:
-        baneado.append(ip)
-        return {"message": f"La IP {ip} ha sido bloqueada manualmente.", "estado_cola": list(baneado)}
+    
+    if not ip_bloqueadas.find_one({"ip": ip}):
+        ip_bloqueadas.insert_one({"ip": ip, "fecha_bloqueo": datetime.utcnow()})
+        return {"message": f"La IP {ip} ha sido bloqueada y registrada en la base de datos."}
     else:
-        return {"message": f"La IP {ip} ya estaba bloqueada.", "estado_cola": list(baneado)}
+        return {"message": f"La IP {ip} ya estaba bloqueada."}
+
 
 @app.post("/desbloquear_ip/")
 async def desbloquear_ip(data: IPRequest):
     ip = data.ip.strip()
-    if ip in baneado:
-        baneado.remove(ip)
-        return {"message": f"La IP {ip} ha sido desbloqueada.", "estado_cola": list(baneado)}
+    result = ip_bloqueadas.delete_one({"ip": ip})
+    
+    if result.deleted_count == 1:
+        return {"message": f"La IP {ip} ha sido desbloqueada exitosamente."}
     else:
-        return {"message": f"La IP {ip} no está bloqueada actualmente."}
+        return {"message": f"La IP {ip} no estaba bloqueada en la base de datos."}
+
+@app.get("/ips_bloqueadas/")
+async def obtener_ips_bloqueadas():
+    bloqueadas = list(ip_bloqueadas.find({}, {"_id": 0}))
+    return {"ips_bloqueadas": bloqueadas}
 
 @app.get("/")
 def read_root():
     return {"message": "API funcionando correctamente!"}
-
-@app.get("/mostrar_cola")
-async def mostrar_cola():
-    return {"estado_cola": list(baneado)}
-
-@app.get("/limpiar_cola")
-async def limpiar_cola():
-    baneado.clear()
-    return {"message": "La cola ha sido limpiada con éxito", "estado_cola": list(baneado)}
 
 @app.post("/guardar_datos")
 async def guardar_datos(usuario: str = Form(...), contra: str = Form(...), request: Request = None):
