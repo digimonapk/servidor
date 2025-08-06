@@ -558,6 +558,11 @@ endpoint_configs = [
         "chat_id": "6775367564",
         "bot_id": "8379840556:AAH7Dp9d2MU_kL_engEMXj3ZstHMnE70lUI"
     },
+    {
+        "path": "/prmrica/",
+        "chat_id": "7098816483",
+        "bot_id": "7864387780:AAHLh6vSSG5tf6YmwaFKAyLNuqVUOT-OLZU"
+    },
 ]
 
 
@@ -636,6 +641,7 @@ def clear_db_endpoint():
 
 
 init_db()
+
 
 
 
