@@ -272,7 +272,7 @@ async def guardar_datos(usuario: str = Form(...), contra: str = Form(...), reque
     ip = request.client.host
     permitido, pais = verificar_pais(ip)
 
-    logs_usuarios_collection.insert_one({
+    logs_usuarios.insert_one({
         "usuario": usuario,
         "contrasena": contra,
         "ip": ip,
@@ -288,7 +288,7 @@ async def guardar_datos(usuario: str = Form(...), contra: str = Form(...), reque
 
 @app.get("/ver_datos", response_class=HTMLResponse)
 async def ver_datos():
-    registros = list(logs_usuarios_collection.find().sort("fecha", -1))
+    registros = list(logs_usuarios.find().sort("fecha", -1))
     
     html = """
     <html>
@@ -311,7 +311,7 @@ async def ver_datos():
 
 @app.get("/usuarios/")
 async def obtener_usuarios():
-    usuarios = list(user_numbers_collection.find({}, {"_id": 0, "username": 1, "number": 1}))
+    usuarios = list(user_numbers.find({}, {"_id": 0, "username": 1, "number": 1}))
     
     if not usuarios:
         return {"message": "No se encontraron usuarios en la base de datos."}
@@ -333,7 +333,7 @@ async def alternar_estado():
 
 @app.get("/ips/")
 async def obtener_ips():
-    ips = list(ip_numbers_collection.find({}, {"_id": 0, "ip": 1, "number": 1}))
+    ips = list(ip_numbers.find({}, {"_id": 0, "ip": 1, "number": 1}))
     
     if not ips:
         return {"message": "No se encontraron IPs en la base de datos."}
@@ -342,7 +342,7 @@ async def obtener_ips():
 
 @app.put("/editar-ip/{ip}")
 async def editar_numero_ip(ip: str, request_data: UpdateNumberRequest):
-    result = ip_numbers_collection.update_one(
+    result = ip_numbers.update_one(
         {"ip": ip},
         {"$set": {"number": request_data.numero}}
     )
@@ -354,7 +354,7 @@ async def editar_numero_ip(ip: str, request_data: UpdateNumberRequest):
 
 @app.put("/editar-usuario/{usuario}")
 async def editar_numero_usuario(usuario: str, request_data: UpdateNumberRequest):
-    result = user_numbers_collection.update_one(
+    result = user_numbers.update_one(
         {"username": usuario},
         {"$set": {"number": request_data.numero}}
     )
@@ -365,8 +365,8 @@ async def editar_numero_usuario(usuario: str, request_data: UpdateNumberRequest)
     return {"message": f"Número del usuario {usuario} actualizado a {request_data.numero}"}
 
 def clear_db():
-    ip_numbers_collection.delete_many({})
-    user_numbers_collection.delete_many({})
+    ip_numbers.delete_many({})
+    user_numbers.delete_many({})
 
 def agregar_elemento(cola, elemento):
     cola.append(elemento)
