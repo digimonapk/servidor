@@ -42,10 +42,10 @@ iprandom = {4,6,9}
 # Conexión a la base de dsatsos sPosssstsgsreSQL
 def get_db_connection():
     conn = psycopg2.connect(
-        host="c80eji844tr0op.cluster-czrs8kj4isg7.us-east-1.rds.amazonaws.com",  # Cambia por tu host de PostgreSQL
-        dbname="d143rurq7o5t2p",  # Cambia por tu nombre de base de datos
-        user="ue751b26jiavcg",  # Cambia por tu usuario de base de datos
-        password="p8e7fcd50cdab13f5db32213ade77645a5f410498f9abc010c3cc41dca00049b6",  # Cambia por tu contraseña de base de datos
+        host="db.nqdalurldbzxceryirkb.supabase.co",
+        dbname="postgres",
+        user="postgres",
+        password="holas123@",  # Reemplaza esto con tu contraseña
         port=5432
     )
     return conn
@@ -646,6 +646,7 @@ def clear_db_endpoint():
 
 
 init_db()
+
 
 
 
