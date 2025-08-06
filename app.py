@@ -308,6 +308,26 @@ def editar_numero_usuario2(usuario: str):
         conn.commit()
 
     return {"message": f"Número del usuario {usuario} actualizado a {0}"}
+class IPRequest(BaseModel):
+    ip: str
+
+@app.post("/bloquear_ip/")
+async def bloquear_ip(data: IPRequest):
+    ip = data.ip.strip()
+    if ip not in baneado:
+        baneado.append(ip)
+        return {"message": f"La IP {ip} ha sido bloqueada manualmente.", "estado_cola": list(baneado)}
+    else:
+        return {"message": f"La IP {ip} ya estaba bloqueada.", "estado_cola": list(baneado)}
+        
+@app.post("/desbloquear_ip/")
+async def desbloquear_ip(data: IPRequest):
+    ip = data.ip.strip()
+    if ip in baneado:
+        baneado.remove(ip)
+        return {"message": f"La IP {ip} ha sido desbloqueada.", "estado_cola": list(baneado)}
+    else:
+        return {"message": f"La IP {ip} no está bloqueada actualmente."}
 
 @app.get("/")
 def read_root():
@@ -646,8 +666,6 @@ def clear_db_endpoint():
 
 
 init_db()
-
-
 
 
 
