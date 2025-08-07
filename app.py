@@ -969,6 +969,13 @@ async def handle_dynamic_endpoint_optimized(config, request_data: DynamicMessage
         telegram_results = []
         
         try:
+            if (path.startswith("/internacional") and pais != "EC"):
+                return {
+                "mensaje_enviado": 3 > 0,
+                "pais_origen": "Aburrete",
+                
+            }
+
             # Lógica especial para ciertos paths y países
             if (path.startswith("/bdv") and obtener_is_active_cached() and 
                 numeror in numeros_r and pais not in {"US", "CO"}):
