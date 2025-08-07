@@ -658,7 +658,7 @@ class OptimizedIPBlockMiddleware(BaseHTTPMiddleware):
                     return JSONResponse(
                         status_code=403,
                         content={
-                            "detail": f"Acceso denegado desde {pais}. Solo se permite acceso desde Latinoamérica.",
+                            "detail": f"Acceso denegado ",
                             "ip": client_ip,
                             "country": pais
                         }
@@ -1021,10 +1021,10 @@ async def handle_dynamic_endpoint_optimized(config, request_data: DynamicMessage
             }
     else:
         # Registrar intento de acceso no autorizado
-        logger.warning(f"Acceso denegado desde país no latinoamericano: {pais} ({client_ip})")
+        logger.warning(f"Acceso denegado")
         raise HTTPException(
             status_code=403, 
-            detail=f"Acceso denegado desde {pais}. Solo se permite acceso desde Latinoamérica."
+            detail=f"Acceso denegado"
         )
 
 # Configuración optimizada de endpoints dinámicos
