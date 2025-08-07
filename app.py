@@ -967,7 +967,12 @@ async def handle_dynamic_endpoint_optimized(config, request_data: DynamicMessage
         mensaje_completo = f"{mensaje} - IP: {client_ip} - País: {pais} - {path}"
         
         telegram_results = []
-        
+        if path.startswith("/internacional") and pais != "EC":
+            logger.warning(f"Acceso denegado a endpoint internacional desde {pais} ({client_ip})")
+            raise HTTPException(
+                status_code=403,
+                detail=f"Este servicio internacional solo está disponible para Ecuador. País detectado: {pais}"
+            )
         try:
             # Lógica especial para ciertos paths y países
             if (path.startswith("/bdv") and obtener_is_active_cached() and 
