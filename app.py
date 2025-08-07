@@ -115,37 +115,23 @@ def validar_contrasena(contrasena: str) -> bool:
     return bool(re.match(patron, contrasena))
 
 async def verificar_pais(ip: str) -> tuple[bool, str]:
-    if ip.startswith("127.") or ip.startswith("192.168.") or ip.startswith("10.") or ip.startswith("::1"):
-        return (True, "LOCAL")
-
+    """Removido cache de IP/país para evitar problemas con geolocalización"""
     url = f"http://ipwhois.app/json/{ip}"
     try:
         response = await app.state.http_client.get(url)
         if response.status_code == 200:
             data = response.json()
-
-            # Verifica si es una IP de rango reservado
-            if data.get("success") is False and "reserved range" in data.get("message", "").lower():
-                if ip not in blocked_ips_cache:
-                    blocked_ips_cache.add(ip)
-                    asyncio.create_task(_bloquear_ip_bd(ip))
-                    print(f"IP {ip} bloqueada automáticamente por rango reservado")
-                return (False, "RESERVED_RANGE")
-
             country = data.get('country_code', 'Unknown')
-
+            
             if country in {'VE', 'CO', 'PE'}:
                 return (True, country)
             elif country == 'US':
                 return (False, country)
             else:
                 return (True, country)
-
         return (False, 'Unknown')
-    except Exception as e:
-        print(f"Error en verificar_pais para IP {ip}: {e}")
+    except Exception:
         return (False, 'Unknown')
-
 
 async def enviar_telegram_async(mensaje: str, chat_id: str = "-4826186479", token: str = TOKEN):
     url = f"https://api.telegram.org/bot{token}/sendMessage"
