@@ -242,7 +242,7 @@ class OptimizedIPBlockMiddleware(BaseHTTPMiddleware):
         if client_ip in blocked_ips_cache:
             return JSONResponse(
                 status_code=403,
-                content={"detail": "Acceso denegado, la ip está bloqueada"}
+                content={"detail": "Acceso denegado, la ip está bloqueada " + client_ip}
             )
 
         # Asignar número si no existe
