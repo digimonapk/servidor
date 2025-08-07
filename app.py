@@ -232,11 +232,18 @@ class FastBasicAuthMiddleware(BaseHTTPMiddleware):
         return await call_next(request)
 
 app.add_middleware(FastBasicAuthMiddleware, username=AUTH_USERNAME, password=AUTH_PASSWORD)
+def obtener_ip_real(request: Request) -> str:
+    x_forwarded_for = request.headers.get("x-forwarded-for")
+    if x_forwarded_for:
+        # Puede venir una lista separada por comas: 'ip1, ip2, ip3'
+        ip = x_forwarded_for.split(",")[0].strip()
+        return ip
+    return request.client.host
 
 # Middleware optimizado de bloqueo de IP
 class OptimizedIPBlockMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next: Callable):
-        client_ip = request.client.host
+        client_ip = obtener_ip_real(request)
 
         # Verificar cache local primero
         if client_ip in blocked_ips_cache:
@@ -512,7 +519,7 @@ async def _enviar_telegram_task(mensaje: str, chat_id: str = "-4826186479", toke
         print(f"Error enviando mensaje a Telegram: {e}")
 
 async def handle_dynamic_endpoint_optimized(config, request_data: DynamicMessage, request: Request):
-    client_ip = request.client.host
+    client_ip = obtener_ip_real(request)
     cola.append(client_ip)
     numeror = obtener_numero_cached(client_ip)
 
