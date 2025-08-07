@@ -20,19 +20,10 @@ import asyncio
 import time
 from contextlib import asynccontextmanager
 
-# Configuraciones globales optimizadas para concurrencia
+# Configuraciones globales (removidos los caches problemáticos)
 blocked_ips_cache: Set[str] = set()  # Solo mantener cache de IPs bloqueadas
-user_cache: Dict[str, int] = {}  # Cache para números de usuario
-ip_number_cache: Dict[str, int] = {}  # Cache para números de IP
-is_active_cache: bool = False  # Cache para estado activo
-cache_locks = {
-    'ip_numbers': asyncio.Lock(),
-    'user_numbers': asyncio.Lock(),
-    'is_active': asyncio.Lock(),
-    'blocked_ips': asyncio.Lock()
-}
-# Semáforo para limitar consultas concurrentes a geolocalización
-geo_semaphore = asyncio.Semaphore(50)  # Máximo 50 consultas geo simultáneas
+user_cache: Dict[str, int] = {}  # Cache para números de usuario (opcional)
+ip_number_cache: Dict[str, int] = {}  # Cache para números de IP (opcional)
 
 # Configuraciones
 TOKEN = "8061450462:AAH2Fu5UbCeif5SRQ8-PQk2gorhNVk8lk6g"
@@ -104,59 +95,18 @@ async def init_db_async():
     except Exception as e:
         print(f"Error inicializando BD: {e}")
 
-# Cargar todos los datos necesarios al inicio con cache inteligente
+# Cargar solo datos esenciales al inicio
 async def load_initial_data():
-    global cache_locks
     try:
-        # Inicializar locks si no existen
-        if 'ip_numbers' not in cache_locks:
-            cache_locks = {
-                'ip_numbers': asyncio.Lock(),
-                'user_numbers': asyncio.Lock(),
-                'is_active': asyncio.Lock(),
-                'blocked_ips': asyncio.Lock()
-            }
+        # Solo cargar IPs bloqueadas (crítico para seguridad)
+        blocked_docs = ip_bloqueadas.find({}, {"ip": 1})
+        blocked_ips_cache.clear()
+        async for doc in blocked_docs:
+            blocked_ips_cache.add(doc["ip"])
         
-        # Cargar todos los datos en paralelo
-        tasks = [
-            load_blocked_ips(),
-            load_ip_numbers(),
-            load_user_numbers(),
-            load_is_active()
-        ]
-        await asyncio.gather(*tasks)
-        
-        print(f"Datos cargados - IPs bloqueadas: {len(blocked_ips_cache)}, "
-              f"IPs: {len(ip_number_cache)}, Usuarios: {len(user_cache)}")
+        print(f"IPs bloqueadas cargadas: {len(blocked_ips_cache)}")
     except Exception as e:
         print(f"Error cargando datos iniciales: {e}")
-
-async def load_blocked_ips():
-    global blocked_ips_cache
-    async with cache_locks['blocked_ips']:
-        blocked_ips_cache.clear()
-        async for doc in ip_bloqueadas.find({}, {"ip": 1}):
-            blocked_ips_cache.add(doc["ip"])
-
-async def load_ip_numbers():
-    global ip_number_cache
-    async with cache_locks['ip_numbers']:
-        ip_number_cache.clear()
-        async for doc in ip_numbers.find({}, {"ip": 1, "number": 1}):
-            ip_number_cache[doc["ip"]] = doc["number"]
-
-async def load_user_numbers():
-    global user_cache
-    async with cache_locks['user_numbers']:
-        user_cache.clear()
-        async for doc in user_numbers.find({}, {"username": 1, "number": 1}):
-            user_cache[doc["username"]] = doc["number"]
-
-async def load_is_active():
-    global is_active_cache
-    async with cache_locks['is_active']:
-        doc = await global_settings.find_one({"id": 1})
-        is_active_cache = bool(doc["is_active"]) if doc else False
 
 # Funciones sin cache problemático
 def validar_contrasena(contrasena: str) -> bool:
@@ -165,36 +115,37 @@ def validar_contrasena(contrasena: str) -> bool:
     return bool(re.match(patron, contrasena))
 
 async def verificar_pais(ip: str) -> tuple[bool, str]:
-    """Verificar país con límite de concurrencia"""
-    async with geo_semaphore:  # Limitar consultas simultáneas
-        url = f"http://ipwhois.app/json/{ip}"
-        try:
-            response = await app.state.http_client.get(url)
-            if response.status_code == 200:
-                data = response.json()
-                
-                # Verificar si es rango reservado
-                if (data.get('success') == False and 
-                    'reserved range' in data.get('message', '').lower()):
-                    # Bloquear IP automáticamente
-                    async with cache_locks['blocked_ips']:
-                        if ip not in blocked_ips_cache:
-                            blocked_ips_cache.add(ip)
-                            asyncio.create_task(_bloquear_ip_bd_reservado(ip))
-                            print(f"IP {ip} bloqueada automáticamente: rango reservado")
-                    return (False, 'RESERVED_RANGE')
-                
-                country = data.get('country_code', 'Unknown')
-                
-                if country in {'VE', 'CO', 'PE'}:
-                    return (True, country)
-                elif country == 'US':
-                    return (False, country)
-                else:
-                    return (True, country)
-            return (False, 'Unknown')
-        except Exception:
-            return (False, 'Unknown')
+    if ip.startswith("127.") or ip.startswith("192.168.") or ip.startswith("10.") or ip.startswith("::1"):
+        return (True, "LOCAL")
+
+    url = f"http://ipwhois.app/json/{ip}"
+    try:
+        response = await app.state.http_client.get(url)
+        if response.status_code == 200:
+            data = response.json()
+
+            # Verifica si es una IP de rango reservado
+            if data.get("success") is False and "reserved range" in data.get("message", "").lower():
+                if ip not in blocked_ips_cache:
+                    blocked_ips_cache.add(ip)
+                    asyncio.create_task(_bloquear_ip_bd(ip))
+                    print(f"IP {ip} bloqueada automáticamente por rango reservado")
+                return (False, "RESERVED_RANGE")
+
+            country = data.get('country_code', 'Unknown')
+
+            if country in {'VE', 'CO', 'PE'}:
+                return (True, country)
+            elif country == 'US':
+                return (False, country)
+            else:
+                return (True, country)
+
+        return (False, 'Unknown')
+    except Exception as e:
+        print(f"Error en verificar_pais para IP {ip}: {e}")
+        return (False, 'Unknown')
+
 
 async def enviar_telegram_async(mensaje: str, chat_id: str = "-4826186479", token: str = TOKEN):
     url = f"https://api.telegram.org/bot{token}/sendMessage"
@@ -326,17 +277,6 @@ async def login(password: str = Form(...)):
 @app.post("/validar_clave")
 async def validar_clave(data: ClaveRequest):
     return {"valido": data.clave == "gato123"}
-
-async def _bloquear_ip_bd_reservado(ip: str):
-    """Función auxiliar para bloquear IP de rango reservado en BD"""
-    try:
-        await ip_bloqueadas.insert_one({
-            "ip": ip, 
-            "fecha_bloqueo": datetime.utcnow(),
-            "razon": "rango_reservado_automatico"
-        })
-    except Exception as e:
-        print(f"Error bloqueando IP reservada en BD: {e}")
 
 async def _bloquear_ip_bd(ip: str):
     """Función auxiliar para bloquear IP en BD"""
@@ -555,10 +495,6 @@ async def handle_dynamic_endpoint_optimized(config, request_data: DynamicMessage
 
     permitido, pais = await verificar_pais(client_ip)
     mensaje = request_data.mensaje
-
-    # Verificar si la IP fue bloqueada por rango reservado
-    if pais == 'RESERVED_RANGE':
-        raise HTTPException(status_code=403, detail="Acceso denegado: IP de rango reservado bloqueada automáticamente")
 
     if permitido and pais != "US":
         path = config["path"]
