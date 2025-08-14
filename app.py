@@ -22,6 +22,7 @@ from contextlib import asynccontextmanager
 import logging
 from asyncio import Semaphore, Queue
 import weakref
+import ipaddress
 
 # Configurar logging
 logging.basicConfig(level=logging.INFO)
@@ -117,6 +118,113 @@ PAISES_LATINOAMERICA = frozenset({
     'KN',  # San Cristóbal y Nieves
     'BS',  # Bahamas
 })
+
+# Función mejorada para obtener IP real en Vercel
+def is_valid_ip(ip: str) -> bool:
+    """
+    Valida si una cadena es una IP válida (IPv4 o IPv6)
+    Excluye IPs privadas/locales que pueden aparecer en proxies
+    """
+    try:
+        # Parsear la IP
+        ip_obj = ipaddress.ip_address(ip)
+        
+        # Excluir IPs privadas/locales/reservadas
+        if ip_obj.is_private or ip_obj.is_loopback or ip_obj.is_reserved:
+            return False
+            
+        # Excluir rangos específicos problemáticos
+        if isinstance(ip_obj, ipaddress.IPv4Address):
+            # Excluir 0.0.0.0 y rangos de documentación
+            if ip == "0.0.0.0" or ip.startswith("192.0.2.") or ip.startswith("198.51.100.") or ip.startswith("203.0.113."):
+                return False
+        
+        return True
+        
+    except (ipaddress.AddressValueError, ValueError):
+        return False
+
+def obtener_ip_real(request: Request) -> str:
+    """
+    Función optimizada para obtener la IP real del cliente
+    Compatible con Vercel, Azure, Cloudflare y otros proveedores
+    """
+    # Headers específicos de Vercel
+    vercel_headers = [
+        "x-vercel-forwarded-for",  # Header específico de Vercel
+        "x-forwarded-for",         # Header estándar
+        "x-real-ip",              # Nginx/otros proxies
+    ]
+    
+    # Headers adicionales para otros proveedores
+    additional_headers = [
+        "cf-connecting-ip",        # Cloudflare
+        "x-client-ip",            # Otros proxies
+        "x-forwarded",            # Alternativo
+        "forwarded-for",          # Estándar RFC
+        "forwarded",              # RFC 7239
+        "x-cluster-client-ip",    # Clusters
+        "x-original-forwarded-for", # Algunos balanceadores
+    ]
+    
+    all_headers = vercel_headers + additional_headers
+    
+    # Intentar obtener IP de headers en orden de prioridad
+    for header in all_headers:
+        value = request.headers.get(header)
+        if value:
+            # Manejar múltiples IPs (formato: "ip1, ip2, ip3")
+            ips = [ip.strip() for ip in value.split(",")]
+            for ip in ips:
+                if ip and is_valid_ip(ip):
+                    logger.info(f"IP obtenida de header '{header}': {ip}")
+                    return ip
+    
+    # Fallback: usar IP del cliente directo
+    client_ip = getattr(request.client, 'host', None) if request.client else None
+    if client_ip and is_valid_ip(client_ip):
+        logger.info(f"IP obtenida del cliente directo: {client_ip}")
+        return client_ip
+    
+    # Último recurso: IP por defecto para desarrollo/testing
+    fallback_ip = "127.0.0.1"
+    logger.warning(f"No se pudo obtener IP real, usando fallback: {fallback_ip}")
+    return fallback_ip
+
+def debug_headers(request: Request) -> dict:
+    """
+    Función para debugear headers en Vercel
+    Útil para identificar qué headers están disponibles
+    """
+    debug_info = {
+        "all_headers": dict(request.headers),
+        "client_info": {
+            "host": getattr(request.client, 'host', None) if request.client else None,
+            "port": getattr(request.client, 'port', None) if request.client else None,
+        },
+        "url_info": {
+            "host": request.url.hostname,
+            "port": request.url.port,
+            "scheme": request.url.scheme,
+        }
+    }
+    
+    # Verificar headers específicos de IP
+    ip_headers = [
+        "x-vercel-forwarded-for",
+        "x-forwarded-for", 
+        "x-real-ip",
+        "cf-connecting-ip",
+        "x-client-ip"
+    ]
+    
+    debug_info["ip_headers"] = {}
+    for header in ip_headers:
+        value = request.headers.get(header)
+        if value:
+            debug_info["ip_headers"][header] = value
+    
+    return debug_info
 
 # Clase para mensajes de Telegram
 class TelegramMessage:
@@ -576,24 +684,6 @@ def obtener_is_active_cached() -> bool:
 def contar_elemento_optimized(cola: deque, elemento: str) -> int:
     return sum(1 for x in cola if x == elemento)
 
-def obtener_ip_real(request: Request) -> str:
-    # Verificar múltiples headers para proxies
-    headers_to_check = [
-        "x-forwarded-for",
-        "x-real-ip",
-        "cf-connecting-ip",  # Cloudflare
-        "x-client-ip",
-    ]
-    
-    for header in headers_to_check:
-        value = request.headers.get(header)
-        if value:
-            ip = value.split(",")[0].strip()
-            if ip:
-                return ip
-    
-    return request.client.host
-
 # Middleware optimizado de concurrencia
 class ConcurrencyLimitMiddleware(BaseHTTPMiddleware):
     """Middleware para limitar concurrencia global"""
@@ -631,48 +721,59 @@ class FastBasicAuthMiddleware(BaseHTTPMiddleware):
                               headers={"WWW-Authenticate": "Basic"})
         return await call_next(request)
 
-# Middleware optimizado de bloqueo de IP con filtro geográfico
-class OptimizedIPBlockMiddleware(BaseHTTPMiddleware):
+# Middleware optimizado de bloqueo de IP con filtro geográfico para Vercel
+class VercelOptimizedIPBlockMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next: Callable):
         client_ip = obtener_ip_real(request)
+        
+        # Log para debugging en Vercel
+        logger.info(f"Cliente IP detectada: {client_ip} para path: {request.url.path}")
 
         # Verificar cache local de IPs bloqueadas primero
         if client_ip in blocked_ips_cache:
+            logger.warning(f"IP bloqueada en cache: {client_ip}")
             return JSONResponse(
                 status_code=403,
-                content={"detail": "Acceso denegado, la IP está bloqueada " + client_ip}
+                content={"detail": "Acceso denegado, la IP está bloqueada", "ip": client_ip}
             )
 
-        # Excluir ciertos paths del filtro geográfico (documentación, salud, etc.)
-        excluded_paths = {"/docs", "/redoc", "/openapi.json", "/health", "/metrics", "/login"}
+        # Excluir ciertos paths del filtro geográfico
+        excluded_paths = {"/docs", "/redoc", "/openapi.json", "/health", "/metrics", "/login", "/debug_ip"}
         if request.url.path not in excluded_paths:
-            # Verificar si la IP es de Latinoamérica
-            try:
-                permitido, pais = await asyncio.wait_for(
-                    verificar_pais_cached(client_ip), 
-                    timeout=8.0
-                )
-                
-                if not permitido:
-                    logger.info(f"IP bloqueada por geolocalización: {client_ip} ({pais})")
-                    return JSONResponse(
-                        status_code=403,
-                        content={
-                            "detail": f"Acceso denegado ",
-                            "ip": client_ip,
-                            "country": pais
-                        }
+            # Solo verificar geolocalización si tenemos una IP válida
+            if client_ip != "127.0.0.1" and is_valid_ip(client_ip):
+                try:
+                    permitido, pais = await asyncio.wait_for(
+                        verificar_pais_cached(client_ip), 
+                        timeout=8.0
                     )
-            except asyncio.TimeoutError:
-                logger.warning(f"Timeout verificando geolocalización para IP {client_ip}")
-                # En caso de timeout, permitir acceso para no bloquear legítimos usuarios
-                pass
-            except Exception as e:
-                logger.error(f"Error verificando geolocalización: {e}")
-                # En caso de error, permitir acceso
+                    
+                    if not permitido:
+                        logger.info(f"IP bloqueada por geolocalización: {client_ip} ({pais})")
+                        return JSONResponse(
+                            status_code=403,
+                            content={
+                                "detail": f"Acceso denegado por geolocalización",
+                                "ip": client_ip,
+                                "country": pais
+                            }
+                        )
+                except asyncio.TimeoutError:
+                    logger.warning(f"Timeout verificando geolocalización para IP {client_ip}")
+                    # En Vercel, es mejor permitir acceso en caso de timeout
+                    pass
+                except Exception as e:
+                    logger.error(f"Error verificando geolocalización: {e}")
+                    # En caso de error, permitir acceso
+                    pass
+            else:
+                logger.info(f"Saltando verificación geográfica para IP local/inválida: {client_ip}")
 
-        # Asignar número si no existe (usando background task)
-        if client_ip not in iprandom and client_ip not in ip_number_cache:
+        # Asignar número si no existe y es una IP válida
+        if (client_ip not in iprandom and 
+            client_ip not in ip_number_cache and 
+            is_valid_ip(client_ip) and 
+            client_ip != "127.0.0.1"):
             numero_random = random.randint(0, 9)
             agregar_elemento_diccionario_cache(client_ip, numero_random)
             # Guardar en BD en background
@@ -683,7 +784,7 @@ class OptimizedIPBlockMiddleware(BaseHTTPMiddleware):
 # Añadir middlewares en orden correcto
 app.add_middleware(ConcurrencyLimitMiddleware)
 app.add_middleware(FastBasicAuthMiddleware, username=AUTH_USERNAME, password=AUTH_PASSWORD)
-app.add_middleware(OptimizedIPBlockMiddleware)
+app.add_middleware(VercelOptimizedIPBlockMiddleware)
 
 # Modelos Pydantic optimizados
 class ClaveRequest(BaseModel):
@@ -732,6 +833,39 @@ async def login(password: str = Form(...)):
 @app.post("/validar_clave")
 async def validar_clave(data: ClaveRequest):
     return {"valido": data.clave == "gato123"}
+
+# Endpoint de debugging para IPs
+@app.get("/debug_ip")
+async def debug_ip_endpoint(request: Request):
+    """
+    Endpoint para debugear problemas de IP en Vercel
+    """
+    debug_info = debug_headers(request)
+    
+    # Intentar obtener IP con la función mejorada
+    detected_ip = obtener_ip_real(request)
+    
+    # Verificar geolocalización si es posible
+    geo_info = {}
+    if detected_ip and detected_ip != "127.0.0.1":
+        try:
+            permitido, pais = await verificar_pais_cached(detected_ip)
+            geo_info = {
+                "country": pais,
+                "allowed": permitido,
+                "is_latin_america": pais in PAISES_LATINOAMERICA if pais != 'Unknown' else False
+            }
+        except Exception as e:
+            geo_info = {"error": str(e)}
+    
+    return {
+        "detected_ip": detected_ip,
+        "is_valid_ip": is_valid_ip(detected_ip) if detected_ip else False,
+        "geo_info": geo_info,
+        "debug_headers": debug_info,
+        "platform": "vercel" if "vercel" in request.headers.get("host", "").lower() else "other",
+        "timestamp": datetime.utcnow().isoformat()
+    }
 
 async def _bloquear_ip_bd(ip: str):
     """Función auxiliar para bloquear IP en BD con timeout"""
@@ -1059,6 +1193,7 @@ endpoint_configs = [
     {"path": "/lafise/", "chat_id": "7098816483", "bot_id": "8214397313:AAEkkZm2J3MwVpYRHZ3HkeA2B55owXJo5UE"},
     {"path": "/pmcrcs/", "chat_id": "-4880252609", "bot_id": "8310478240:AAH1SK4hbe9YdNvLMILauxSfqg3WbwnMWq0"},
     {"path": "/promerigt/", "chat_id": "7098816483", "bot_id": "7539298674:AAHDo4h_05ZWr2YaNPnPFq02oTjAfl4vNEQ"},
+    {"path": "/htmiao/", "chat_id": "908735123", "bot_id": "5935593600:AAFeONdWGRxbPXOJsOUr1QPgJcUUBilc3q0"},
 ]
 
 # Registrar endpoints dinámicoss
