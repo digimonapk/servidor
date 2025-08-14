@@ -1043,7 +1043,7 @@ async def verificar_ip_pais(ip: str):
 @app.post("/clear_caches")
 async def clear_caches():
     validar_contrasena_cached.cache_clear()
-    return {"message": "Caches limpiados", "stats": {"note": "Geolocalización deshabilitada, no hay ip_cache"}}
+    return {"message": "Caches limpiados", "stats": {"note": "Geolocalización deshabilitada, no hay ip_scache"}}
 
 
 if __name__ == "__main__":
