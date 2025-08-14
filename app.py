@@ -185,20 +185,29 @@ class TelegramMessage:
 
 def check_rate_limit(token: str) -> bool:
     current_time = time.time()
-    current_second = int(current_time)
     rate_info = bot_rate_limits[token]
-    rate_info["messages"] = [timestamp for timestamp in rate_info["messages"] if timestamp > current_time - 60]
+
+    # Limpia ventana de 60 segundos
+    rate_info["messages"] = [t for t in rate_info["messages"] if t > current_time - 60]
+
+    # Límite por minuto
     if len(rate_info["messages"]) >= RATE_LIMIT_MESSAGES_PER_MINUTE:
         return False
-    if rate_info["last_second"] == current_second:
+
+    # Límite por segundo (usa tu constante RATE_LIMIT_MESSAGES_PER_SECOND)
+    # cuenta cuántos hay en el segundo actual
+    current_second = int(current_time)
+    per_second = sum(1 for t in rate_info["messages"] if int(t) == current_second)
+    if per_second >= RATE_LIMIT_MESSAGES_PER_SECOND:
         return False
+
     return True
+
 
 def record_message_sent(token: str):
     current_time = time.time()
     rate_info = bot_rate_limits[token]
     rate_info["messages"].append(current_time)
-    rate_info["last_second"] = int(current_time)
 
 async def _enviar_telegram_optimizado(mensaje_obj: TelegramMessage) -> bool:
     async with telegram_semaphore:
@@ -285,33 +294,47 @@ async def telegram_worker(worker_id: int):
             logger.error(f"Error en telegram worker {worker_id}: {e}")
             await asyncio.sleep(1)
 
-async def enviar_telegram_hibrido(mensaje: str, chat_id: str = "-4826186479", token: str = TOKEN,
-                                  priority: int = 1, force_immediate: bool = False) -> dict:
+async def enviar_telegram_hibrido(
+    mensaje: str,
+    chat_id: str = "-4826186479",
+    token: str = TOKEN,
+    priority: int = 1,
+    force_immediate: bool = True
+) -> dict:
+    """
+    Intenta SIEMPRE enviar directo primero. Solo si falla, cae a la cola.
+    """
     mensaje_obj = TelegramMessage(mensaje, chat_id, token, priority)
-    if force_immediate or (telegram_semaphore._value > 5 and telegram_queue.qsize() < 50):
-        if check_rate_limit(token):
-            try:
-                success = await asyncio.wait_for(
-                    _enviar_telegram_optimizado(mensaje_obj),
-                    timeout=TELEGRAM_TIMEOUT + 2.0
-                )
-                if success:
-                    telegram_stats["sent_immediate"] += 1
-                    telegram_stats["total_processed"] += 1
-                    return {"status": "sent_immediate", "success": True, "method": "direct"}
-            except asyncio.TimeoutError:
-                logger.warning("Timeout en envío inmediato, pasando a cola")
-            except Exception as e:
-                logger.error(f"Error en envío inmediato: {e}")
+
+    # 1) Intento inmediato (sin condiciones previas)
+    try:
+        success = await asyncio.wait_for(
+            _enviar_telegram_optimizado(mensaje_obj),
+            timeout=TELEGRAM_TIMEOUT + 2.0
+        )
+        if success:
+            telegram_stats["sent_immediate"] += 1
+            telegram_stats["total_processed"] += 1
+            return {"status": "sent_immediate", "success": True, "method": "direct"}
+    except asyncio.TimeoutError:
+        logger.warning("Timeout en envío inmediato; se intentará en cola")
+    except Exception as e:
+        logger.error(f"Error en envío inmediato: {e}")
+
+    # 2) Fallback a cola
     try:
         telegram_queue.put_nowait(mensaje_obj)
-        return {"status": "queued", "success": True, "method": "queue", "queue_size": telegram_queue.qsize()}
+        return {
+            "status": "queued",
+            "success": True,
+            "method": "queue",
+            "queue_size": telegram_queue.qsize()
+        }
     except asyncio.QueueFull:
         telegram_stats["queue_full"] += 1
         logger.error("Cola de Telegram llena, mensaje descartado")
         return {"status": "queue_full", "success": False, "method": "none"}
 
-# =====================
 #  Lifespan
 # =====================
 
