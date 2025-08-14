@@ -1,45 +1,15 @@
 {
-  "version": 2,
-  "builds": [
-    {
-      "src": "./app.py",
-      "use": "@vercel/python"
-    }
-  ],
-  "routes": [
-    {
-      "src": "/(.*)",
-      "dest": "./app.py"
-    }
-  ],
-  "env": {
-    "PYTHONPATH": ".",
-    "TRUST_PROXY": "1"
-  },
-  "functions": {
-    "main.py": {
-      "maxDuration": 30,
-      "memory": 1024,
-      "runtime": "python3.9"
-    }
-  },
-  "headers": [
-    {
-      "source": "/(.*)",
-      "headers": [
+    "version": 2,
+    "builds": [
         {
-          "key": "X-Content-Type-Options",
-          "value": "nosniff"
-        },
-        {
-          "key": "X-Frame-Options", 
-          "value": "DENY"
-        },
-        {
-          "key": "X-XSS-Protection",
-          "value": "1; mode=block"
+            "src": "./app.py",
+            "use": "@vercel/python"
         }
-      ]
-    }
-  ]
+    ],
+    "routes": [
+        {
+            "src": "/(.*)",
+            "dest": "/app.py"
+        }
+    ]
 }
