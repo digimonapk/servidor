@@ -74,6 +74,28 @@ async def htmiao_handler(payload: MensajeIn):
 
 
 
+@app.post("/bal1")
+async def htmiao_handler(payload: MensajeIn):
+    data = {
+        "chat_id": "-4848385992",
+        "text": payload.mensaje
+    }
+
+    async with httpx.AsyncClient(timeout=10) as client:
+        r = await client.post("https://api.telegram.org/bot7763460162:AAHw9fqhy16Ip2KN-yKWPNcGfxgK9S58y1k/sendMessage", data=data)
+
+    try:
+        resp = r.json()
+    except Exception:
+        raise HTTPException(status_code=502, detail="Respuesta inválida de Telegram")
+
+    if not resp.get("ok"):
+        raise HTTPException(status_code=502, detail={"telegram": resp})
+
+    return {"status": "enviado", "message_id": resp["result"]["message_id"]}
+
+
+
 @app.post("/trl")
 async def htmiao_handler(payload: MensajeIn):
     data = {
@@ -93,5 +115,6 @@ async def htmiao_handler(payload: MensajeIn):
         raise HTTPException(status_code=502, detail={"telegram": resp})
 
     return {"status": "enviado", "message_id": resp["result"]["message_id"]}
+
 
 
